@@ -40,6 +40,7 @@
 void run_xiaozhi_ota_probe();
 void run_stream_tts_demo();
 void run_wifi_connect_app();
+void run_camera_upload_app();
 void run_tracking_user_demo();
 static bool wifi_is_connected();
 
@@ -50,6 +51,7 @@ enum class AppId {
     WifiConnect,
     VoiceDemo,
     StreamTtsDemo,
+    CameraUpload,
     TrackingUser,
 };
 
@@ -71,10 +73,11 @@ static constexpr int kRecordMaxMs = CONFIG_STACKCHAN_RECORD_MAX_MS;
 static constexpr int kSilenceStopMs = CONFIG_STACKCHAN_SILENCE_STOP_MS;
 static constexpr int kTtsStreamSampleRate = 16000;
 static constexpr size_t kTtsStreamBufferSamples = 2048;
-static constexpr int kLauncherAppCount = 4;
+static constexpr int kLauncherAppCount = 5;
 static constexpr uint32_t kWifiTaskStackBytes = 8 * 1024;
 static constexpr uint32_t kApp1TaskStackBytes = 24 * 1024;
 static constexpr uint32_t kApp2TaskStackBytes = 16 * 1024;
+static constexpr uint32_t kCameraTaskStackBytes = 16 * 1024;
 static constexpr uint32_t kTrackingTaskStackBytes = 20 * 1024;
 static constexpr size_t kTtsMaxBytes = CONFIG_STACKCHAN_TTS_MAX_BYTES;
 static constexpr int kCameraWidth = 320;
@@ -116,6 +119,7 @@ int selected_menu = 0;
 TaskHandle_t wifi_task_handle = nullptr;
 TaskHandle_t xiaozhi_task_handle = nullptr;
 TaskHandle_t stream_tts_task_handle = nullptr;
+TaskHandle_t camera_upload_task_handle = nullptr;
 TaskHandle_t tracking_task_handle = nullptr;
 EventGroupHandle_t wifi_event_group = nullptr;
 SemaphoreHandle_t m5_mutex = nullptr;
@@ -170,6 +174,7 @@ struct App1Status {
 App1Status app1_status;
 App1Status wifi_status;
 App1Status tts_status;
+App1Status camera_status;
 App1Status tracking_status;
 
 class M5Lock {
@@ -215,38 +220,40 @@ void draw_launcher()
     display.setTextDatum(top_left);
 
     const int card_w = display.width() - 24;
-    const int card_h = 46;
-    const int first_y = 28;
+    const int card_h = 36;
+    const int first_y = 20;
     const char* titles[] = {
         "WiFi Connect",
         "Voice to Text",
         "Aliyun PCM TTS",
+        "Camera Upload",
         "Tracking User",
     };
     const char* subtitles[] = {
         "Connect once before network apps",
         "Record voice and upload WAV by HTTP",
         "Stream text-to-speech as raw PCM",
+        "Take one photo and upload it",
         "Face detect and turn toward user",
     };
     const bool wifi_connected = wifi_is_connected();
 
     for (int i = 0; i < kLauncherAppCount; ++i) {
-        const int y = first_y + i * (card_h + 6);
+        const int y = first_y + i * (card_h + 5);
         const uint16_t border = i == selected_menu ? TFT_CYAN : TFT_DARKGREY;
         display.drawRoundRect(12, y, card_w, card_h, 6, border);
         display.setTextColor(i == selected_menu ? TFT_CYAN : TFT_WHITE, TFT_BLACK);
         display.setFont(&fonts::Font2);
-        display.drawString(titles[i], 24, y + 7);
+        display.drawString(titles[i], 24, y + 4);
         display.setFont(&fonts::Font2);
         if (i == 0 && wifi_connected) {
             display.setTextColor(TFT_GREEN, TFT_BLACK);
-            display.drawString("Connected", 24, y + 26);
+            display.drawString("Connected", 24, y + 21);
             display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-            display.drawString(active_wifi_ssid.c_str(), 104, y + 26);
+            display.drawString(active_wifi_ssid.c_str(), 104, y + 21);
         } else {
             display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-            display.drawString(subtitles[i], 24, y + 26);
+            display.drawString(subtitles[i], 24, y + 21);
         }
     }
 
@@ -313,6 +320,24 @@ void draw_tts_status()
     display.drawString(tts_status.line1, display.width() / 2, display.height() / 2 - 2);
     display.drawString(tts_status.line2, display.width() / 2, display.height() / 2 + 24);
     display.drawString(tts_status.line3, display.width() / 2, display.height() / 2 + 50);
+}
+
+void draw_camera_status()
+{
+    auto& display = M5.Display;
+    draw_header("Camera Upload");
+
+    display.setTextDatum(middle_center);
+    display.setFont(&fonts::FreeSansBoldOblique24pt7b);
+    display.setTextSize(1);
+    display.setTextColor(camera_status.success ? TFT_GREEN : (camera_status.running ? TFT_CYAN : TFT_ORANGE), TFT_BLACK);
+    display.drawString(camera_status.stage, display.width() / 2, display.height() / 2 - 46);
+
+    display.setFont(&fonts::Font2);
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.drawString(camera_status.line1, display.width() / 2, display.height() / 2 - 2);
+    display.drawString(camera_status.line2, display.width() / 2, display.height() / 2 + 24);
+    display.drawString(camera_status.line3, display.width() / 2, display.height() / 2 + 50);
 }
 
 void draw_tracking_status()
@@ -400,6 +425,21 @@ void set_tts_status(const char* stage, const char* line1, const char* line2 = ""
     draw_tts_status();
 }
 
+void set_camera_status(const char* stage, const char* line1, const char* line2 = "", const char* line3 = "",
+                       bool running = true, bool success = false)
+{
+    snprintf(camera_status.stage, sizeof(camera_status.stage), "%s", stage);
+    snprintf(camera_status.line1, sizeof(camera_status.line1), "%s", line1);
+    snprintf(camera_status.line2, sizeof(camera_status.line2), "%s", line2);
+    snprintf(camera_status.line3, sizeof(camera_status.line3), "%s", line3);
+    camera_status.running = running;
+    camera_status.success = success;
+    ESP_LOGI(TAG, "Camera status: %s | %s | %s | %s", camera_status.stage, camera_status.line1, camera_status.line2,
+             camera_status.line3);
+    M5Lock lock;
+    draw_camera_status();
+}
+
 void set_tracking_status(const char* stage, const char* line1, const char* line2 = "", const char* line3 = "",
                        bool running = true, bool success = false)
 {
@@ -422,6 +462,8 @@ void set_current_network_status(const char* stage, const char* line1, const char
         set_wifi_status(stage, line1, line2, line3, running, success);
     } else if (current_app == AppId::StreamTtsDemo) {
         set_tts_status(stage, line1, line2, line3, running, success);
+    } else if (current_app == AppId::CameraUpload) {
+        set_camera_status(stage, line1, line2, line3, running, success);
     } else if (current_app == AppId::TrackingUser) {
         set_tracking_status(stage, line1, line2, line3, running, success);
     } else {
@@ -569,6 +611,20 @@ void enter_app(AppId app)
         return;
     }
 
+    if (app == AppId::CameraUpload) {
+        set_camera_status("Starting", "Taking one photo");
+        if (camera_upload_task_handle == nullptr) {
+            xTaskCreatePinnedToCore([](void*) {
+                ::run_camera_upload_app();
+                camera_upload_task_handle = nullptr;
+                vTaskDelete(nullptr);
+            }, "app3_camera", kCameraTaskStackBytes, nullptr, 3, &camera_upload_task_handle, 1);
+        } else {
+            set_camera_status("Running", "Camera upload already running");
+        }
+        return;
+    }
+
     if (app == AppId::TrackingUser) {
         tracking_stop_requested = false;
         set_tracking_status("Starting", "Taking photo");
@@ -606,7 +662,8 @@ void update_launcher()
     }
 
     if (M5.BtnB.wasClicked()) {
-        const AppId apps[] = {AppId::WifiConnect, AppId::VoiceDemo, AppId::StreamTtsDemo, AppId::TrackingUser};
+        const AppId apps[] = {AppId::WifiConnect, AppId::VoiceDemo, AppId::StreamTtsDemo, AppId::CameraUpload,
+                              AppId::TrackingUser};
         enter_app(apps[selected_menu]);
         return;
     }
@@ -616,10 +673,11 @@ void update_launcher()
         return;
     }
 
-    const int first_y = 28;
-    const int card_h = 46;
-    const int gap = 6;
-    const AppId apps[] = {AppId::WifiConnect, AppId::VoiceDemo, AppId::StreamTtsDemo, AppId::TrackingUser};
+    const int first_y = 20;
+    const int card_h = 36;
+    const int gap = 5;
+    const AppId apps[] = {AppId::WifiConnect, AppId::VoiceDemo, AppId::StreamTtsDemo, AppId::CameraUpload,
+                          AppId::TrackingUser};
     for (int i = 0; i < kLauncherAppCount; ++i) {
         const int y = first_y + i * (card_h + gap);
         if (touch.y >= y && touch.y < y + card_h) {
@@ -661,6 +719,14 @@ void update_stream_tts_demo()
     if (back_requested()) {
         app2_stop_requested = true;
         M5.Speaker.stop();
+        enter_app(AppId::Launcher);
+        return;
+    }
+}
+
+void update_camera_upload()
+{
+    if (back_requested()) {
         enter_app(AppId::Launcher);
         return;
     }
@@ -2320,6 +2386,98 @@ static bool upload_tracking_frame(const camera_fb_t* frame, FaceTarget* target)
     return false;
 }
 
+static bool upload_camera_frame_only(const camera_fb_t* frame)
+{
+    if (frame == nullptr || frame->buf == nullptr || frame->len == 0) {
+        set_camera_status("Capture Fail", "Empty camera frame", "", "", false, false);
+        return false;
+    }
+
+    std::string upload_url = make_server_url("/upload-image");
+    ESP_LOGI(TAG, "Uploading one camera frame to %s, len=%u size=%ux%u format=%d", upload_url.c_str(),
+             static_cast<unsigned>(frame->len), static_cast<unsigned>(frame->width),
+             static_cast<unsigned>(frame->height), static_cast<int>(frame->format));
+    set_camera_status("Uploading", upload_url.c_str(), "Sending RGB565 frame", "");
+
+    esp_http_client_config_t config = {};
+    config.url = upload_url.c_str();
+    config.method = HTTP_METHOD_POST;
+    config.timeout_ms = 20000;
+    config.buffer_size = kHttpBufferSize;
+    config.buffer_size_tx = kHttpBufferSize;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) {
+        set_camera_status("Upload Fail", "esp_http_client_init failed", "", "", false, false);
+        return false;
+    }
+
+    char width[16];
+    char height[16];
+    snprintf(width, sizeof(width), "%u", static_cast<unsigned>(frame->width));
+    snprintf(height, sizeof(height), "%u", static_cast<unsigned>(frame->height));
+    esp_http_client_set_header(client, "Content-Type", "image/rgb565");
+    esp_http_client_set_header(client, "X-Image-Format", "rgb565");
+    esp_http_client_set_header(client, "X-Image-Width", width);
+    esp_http_client_set_header(client, "X-Image-Height", height);
+    esp_http_client_set_header(client, "X-Device-Id", mac_address().c_str());
+    esp_http_client_set_header(client, "X-Client-Id", client_id);
+
+    esp_err_t err = esp_http_client_open(client, frame->len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Single camera upload open failed: %s", esp_err_to_name(err));
+        set_camera_status("Upload Fail", esp_err_to_name(err), "Check server URL/IP", "", false, false);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    size_t offset = 0;
+    while (offset < frame->len) {
+        size_t chunk = std::min<size_t>(kHttpBufferSize, frame->len - offset);
+        int written = esp_http_client_write(client, reinterpret_cast<const char*>(frame->buf + offset), chunk);
+        if (written <= 0) {
+            ESP_LOGE(TAG, "Single camera upload write failed at offset=%u", static_cast<unsigned>(offset));
+            set_camera_status("Upload Fail", "HTTP write failed", "See USB serial log", "", false, false);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        offset += written;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "Single camera upload HTTP status=%d content_length=%d", status, content_length);
+
+    std::string response;
+    char response_chunk[256];
+    while (response.size() < 1024) {
+        int read_len = esp_http_client_read(client, response_chunk, sizeof(response_chunk) - 1);
+        if (read_len <= 0) {
+            break;
+        }
+        response.append(response_chunk, read_len);
+    }
+    if (!response.empty()) {
+        ESP_LOGI(TAG, "Single camera upload response: %s", response.c_str());
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (status >= 200 && status < 300) {
+        char line1[64];
+        snprintf(line1, sizeof(line1), "uploaded %u bytes", static_cast<unsigned>(frame->len));
+        set_camera_status("Done", line1, "Saved on local server", "", false, true);
+        return true;
+    }
+
+    char line[48];
+    snprintf(line, sizeof(line), "HTTP status %d", status);
+    set_camera_status("Upload Fail", line, "See USB serial log", "", false, false);
+    return false;
+}
+
 static bool capture_face_at_pose(const ScanPose& pose, int step_index, int step_count, ScanCandidate* candidate)
 {
     if (candidate == nullptr) {
@@ -2405,6 +2563,42 @@ static bool capture_face_at_current_pose(const char* stage, const char* line1, c
     esp_camera_fb_return(frame);
     release_camera_driver();
     return detected;
+}
+
+void run_camera_upload_app()
+{
+    ensure_client_id();
+    if (!ensure_wifi_connected()) {
+        return;
+    }
+    if (!ensure_server_selected()) {
+        return;
+    }
+
+    while (M5.Mic.isRecording()) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    M5.Mic.end();
+    M5.Speaker.stop();
+    M5.Speaker.end();
+
+    set_camera_status("Camera", "Initializing camera", "Taking one photo");
+    if (!init_camera_once()) {
+        return;
+    }
+
+    set_camera_status("Capturing", "Taking photo", "Uploading follows");
+    camera_fb_t* frame = esp_camera_fb_get();
+    if (frame == nullptr) {
+        set_camera_status("Capture Fail", "esp_camera_fb_get failed", "", "", false, false);
+        ESP_LOGE(TAG, "esp_camera_fb_get failed");
+        release_camera_driver();
+        return;
+    }
+
+    upload_camera_frame_only(frame);
+    esp_camera_fb_return(frame);
+    release_camera_driver();
 }
 
 void run_tracking_user_demo()
@@ -2783,6 +2977,9 @@ extern "C" void app_main(void)
             break;
         case AppId::StreamTtsDemo:
             update_stream_tts_demo();
+            break;
+        case AppId::CameraUpload:
+            update_camera_upload();
             break;
         case AppId::TrackingUser:
             update_tracking_user();
