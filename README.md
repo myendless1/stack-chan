@@ -1,34 +1,57 @@
-# StackChan Counter Demo
+# Stack-chan Firmware
 
-This is a minimal ESP-IDF firmware demo for StackChan/CoreS3.
+ESP-IDF firmware for Stack-chan / M5Stack CoreS3.
 
-Behavior:
+The firmware side contains only the device application: WiFi connection, voice upload, Aliyun PCM streaming TTS playback, and camera upload.
 
-- On boot, the screen shows `0`.
-- Each screen tap increments the number by 1.
+The local HTTP server has been extracted into:
 
-## Requirements
+```text
+stack-chan-server/
+```
 
-- ESP-IDF 5.x
-- Internet access during the first build so ESP-IDF Component Manager can fetch `m5stack/m5unified`
-- StackChan connected by USB
+See [stack-chan-server/README.md](stack-chan-server/README.md) for Aliyun ASR/TTS, image upload, RGB565 conversion, and face detection visualization.
 
 ## Build And Flash
 
-From this `demo` directory:
+Activate ESP-IDF, then build and flash:
 
 ```bash
-idf.py set-target esp32s3
+. ./esp-idf/export.sh
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-If your serial port is different, replace `/dev/ttyACM0`, for example:
+If your serial port is different, replace `/dev/ttyACM0`.
+
+Convenience scripts:
 
 ```bash
-idf.py -p /dev/ttyUSB0 flash monitor
+./build_and_flash.sh
+./flash.sh
 ```
 
-## Notes
+## Firmware Configuration
 
-Flashing this demo replaces the currently installed StackChan firmware. Keep a copy of the original firmware if you need to restore it later.
+Set these URLs to your computer's LAN IP when the local server is running:
+
+```text
+CONFIG_STACKCHAN_RECORD_UPLOAD_URL = http://<lan-ip>:8091/upload
+CONFIG_STACKCHAN_STREAM_TTS_URL    = http://<lan-ip>:8091/stream-speak
+CONFIG_STACKCHAN_IMAGE_UPLOAD_URL  = http://<lan-ip>:8091/upload-image
+```
+
+The Stack-chan server listens on port `8091` by default.
+
+## Project Layout
+
+```text
+main/                    Firmware source
+stack-chan-server/       Local server subproject
+third_parties/           Firmware third-party source
+CMakeLists.txt           ESP-IDF project entry
+sdkconfig.defaults       Default firmware config
+partitions.csv           Flash partition layout
+```
+
+Generated build output is intentionally not part of the cleaned project tree.
