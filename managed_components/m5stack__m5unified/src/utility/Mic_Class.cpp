@@ -25,7 +25,7 @@
 #include <esp_log.h>
 #include <math.h>
 
-#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
  #if __has_include(<driver/i2s_std.h>)
   #if __has_include(<hal/i2s_ll.h>)
    #include <hal/i2s_ll.h>
@@ -311,7 +311,7 @@ namespace m5
 if (_cfg.pin_bck < 0 || _cfg.pin_ws < 0) {
     i2s_pdm_rx_config_t i2s_config;
     memset(&i2s_config, 0, sizeof(i2s_pdm_rx_config_t));
-#if defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined (CONFIG_IDF_TARGET_ESP32H2)
     i2s_config.clk_cfg.clk_src = i2s_clock_src_t::I2S_CLK_SRC_DEFAULT;
 #else
     i2s_config.clk_cfg.clk_src = i2s_clock_src_t::I2S_CLK_SRC_PLL_160M;
@@ -330,7 +330,7 @@ if (_cfg.pin_bck < 0 || _cfg.pin_ws < 0) {
 {
     i2s_std_config_t i2s_config;
     memset(&i2s_config, 0, sizeof(i2s_std_config_t));
-    #if defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined (CONFIG_IDF_TARGET_ESP32H2)
     i2s_config.clk_cfg.clk_src = i2s_clock_src_t::I2S_CLK_SRC_DEFAULT;
 #else
     i2s_config.clk_cfg.clk_src = i2s_clock_src_t::I2S_CLK_SRC_PLL_160M;
@@ -457,7 +457,7 @@ if (_cfg.pin_bck < 0 || _cfg.pin_ws < 0) {
 #endif
 #endif
 
-#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
 
     dev->rx_conf.rx_pdm_en = use_pdm;
     dev->rx_conf.rx_tdm_en = !use_pdm;
@@ -470,7 +470,7 @@ if (_cfg.pin_bck < 0 || _cfg.pin_ws < 0) {
 #endif
     dev->rx_conf.rx_update = 1;
 
-#if defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32H2 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
     dev->rx_conf.rx_bck_div_num = div_m - 1;
 #else
     dev->rx_conf1.rx_bck_div_num = div_m - 1;

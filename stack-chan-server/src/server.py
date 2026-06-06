@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import datetime as _dt
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -10,10 +13,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zlib
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from queue import Empty, Queue
 
 
 ASR_URLS = {
@@ -27,6 +32,11 @@ TTS_URLS = {
     "beijing": "https://nls-gateway-cn-beijing.aliyuncs.com/stream/v1/tts",
     "shenzhen": "https://nls-gateway-cn-shenzhen.aliyuncs.com/stream/v1/tts",
 }
+
+TOKEN_META_ENDPOINT = "https://nls-meta.cn-shanghai.aliyuncs.com/"
+TOKEN_REGION_ID = "cn-shanghai"
+TOKEN_API_VERSION = "2019-02-28"
+TOKEN_REFRESH_MARGIN_SECONDS = 300
 
 
 def split_sentences(text: str, max_chars: int):
@@ -57,6 +67,9 @@ def detect_wav_sample_rate(data: bytes) -> int | None:
 
 class AliyunVoiceServer(ThreadingHTTPServer):
     token: str
+    token_expire_time: int
+    access_key_id: str
+    access_key_secret: str
     appkey: str
     asr_url: str
     tts_url: str
@@ -71,6 +84,19 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     tts_request_timeout: int
     tts_retries: int
     capture_dir: str
+    device_queues: dict[str, Queue]
+    last_ack: dict[str, dict]
+    last_seen: dict[str, float]
+
+    def get_token(self) -> str:
+        if self.access_key_id and self.access_key_secret:
+            now = int(time.time())
+            if not self.token or now >= self.token_expire_time - TOKEN_REFRESH_MARGIN_SECONDS:
+                self.token, self.token_expire_time = create_aliyun_nls_token(
+                    self.access_key_id, self.access_key_secret
+                )
+                print(f"Aliyun NLS token refreshed, expires_at={self.token_expire_time}", flush=True)
+        return self.token
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -93,6 +119,22 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if path == "/devices":
+            self._handle_devices()
+            return
+        if path == "/command":
+            self._handle_command(query)
+            return
+        if path.startswith("/command/"):
+            command_type = path.rsplit("/", 1)[-1]
+            self._handle_command(query, command_type=command_type)
+            return
+        if path == "/device/next-command":
+            self._handle_next_command(query)
+            return
+        if path == "/device/ack":
+            self._handle_ack(query)
+            return
         if path == "/stream-speak":
             self._handle_stream_speak(query.get("text", [""])[0])
             return
@@ -104,6 +146,17 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length > 0 else b""
         if path == "/upload":
             self._handle_upload(body)
+            return
+        if path == "/upload-audio":
+            self._handle_upload(body)
+            return
+        if path == "/command":
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            self._handle_command(query, posted=payload)
+            return
+        if path == "/device/ack":
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            self._handle_ack(query, posted=payload)
             return
         if path == "/upload-image":
             self._handle_upload_image(body)
@@ -129,9 +182,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "missing audio body")
             return
 
+        path, query = self._path_query()
+        device_id = self._device_id(query)
         sample_rate = detect_wav_sample_rate(body) or self.server.sample_rate
         audio_format = "wav" if detect_wav_sample_rate(body) else "pcm"
-        print(f"ASR upload: bytes={len(body)} format={audio_format} sample_rate={sample_rate}")
+        print(f"ASR upload: device={device_id} bytes={len(body)} format={audio_format} sample_rate={sample_rate}")
         try:
             result = self._aliyun_asr(body, audio_format, sample_rate)
         except Exception as exc:
@@ -147,7 +202,103 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"type": "error", "message": message or f"Aliyun ASR status {status}"}, HTTPStatus.BAD_GATEWAY)
             return
 
-        self._send_json({"type": "stt", "text": text, "task_id": result.get("task_id", "")})
+        response = {"type": "stt", "text": text, "task_id": result.get("task_id", ""), "device_id": device_id}
+        if text:
+            reply = f"我听到你说：{text}"
+            command = make_command(
+                "sequence",
+                [
+                    {"type": "face", "expression": "thinking"},
+                    {"type": "speak", "text": reply},
+                    {"type": "face", "expression": "happy"},
+                ],
+            )
+            self._enqueue_command(device_id, command)
+            response["queued_command"] = command["cmd_id"]
+        self._send_json(response)
+
+    def _handle_devices(self):
+        now = time.time()
+        devices = []
+        for device_id, seen in sorted(self.server.last_seen.items()):
+            queue = self._queue_for(device_id)
+            devices.append(
+                {
+                    "device_id": device_id,
+                    "last_seen_seconds_ago": round(now - seen, 1),
+                    "pending_commands": queue.qsize(),
+                    "last_ack": self.server.last_ack.get(device_id),
+                }
+            )
+        self._send_json({"type": "devices", "devices": devices})
+
+    def _handle_command(self, query: dict, command_type: str = "", posted: dict | None = None):
+        posted = posted or {}
+        requested_device_id = first_value(query, "device_id") or posted.get("device_id") or ""
+        device_id = self._resolve_command_device_id(requested_device_id)
+        command_type = command_type or first_value(query, "type") or posted.get("type") or "speak"
+        priority = int(first_value(query, "priority") or posted.get("priority") or 0)
+        interrupt = parse_bool(first_value(query, "interrupt") or posted.get("interrupt") or "false")
+
+        if "payload" in posted and isinstance(posted["payload"], (dict, list)):
+            payload = posted["payload"]
+        else:
+            payload = command_payload_from_query(command_type, query)
+
+        command_wire_type = "motion" if command_type == "move" else command_type
+        command = make_command(command_wire_type, payload, priority=priority, interrupt=interrupt)
+        self._enqueue_command(device_id, command)
+        self._send_json({"type": "queued", "device_id": device_id, "command": command})
+
+    def _handle_next_command(self, query: dict):
+        device_id = self._device_id(query)
+        timeout = float(first_value(query, "timeout") or "25")
+        timeout = max(0.0, min(timeout, 55.0))
+        self.server.last_seen[device_id] = time.time()
+        queue = self._queue_for(device_id)
+        try:
+            command = queue.get(timeout=timeout)
+            self._send_json({"type": "command", "device_id": device_id, "command": command})
+        except Empty:
+            self._send_json({"type": "noop", "device_id": device_id})
+
+    def _handle_ack(self, query: dict, posted: dict | None = None):
+        posted = posted or {}
+        device_id = self._device_id(query) if query else posted.get("device_id", "default")
+        ack = {
+            "cmd_id": first_value(query, "cmd_id") or posted.get("cmd_id", ""),
+            "status": first_value(query, "status") or posted.get("status", "received"),
+            "message": first_value(query, "message") or posted.get("message", ""),
+            "ts": time.time(),
+        }
+        self.server.last_ack[device_id] = ack
+        self.server.last_seen[device_id] = time.time()
+        self._send_json({"type": "ack", "device_id": device_id, "ack": ack})
+
+    def _device_id(self, query: dict) -> str:
+        device_id = first_value(query, "device_id") or self.headers.get("X-Device-Id", "") or "default"
+        return safe_device_id(device_id)
+
+    def _resolve_command_device_id(self, requested_device_id: str) -> str:
+        device_id = safe_device_id(requested_device_id)
+        if is_placeholder_device_id(device_id):
+            latest = latest_seen_device_id(self.server.last_seen)
+            if latest:
+                return latest
+        return device_id
+
+    def _queue_for(self, device_id: str) -> Queue:
+        queue = self.server.device_queues.get(device_id)
+        if queue is None:
+            queue = Queue()
+            self.server.device_queues[device_id] = queue
+        return queue
+
+    def _enqueue_command(self, device_id: str, command: dict) -> None:
+        device_id = safe_device_id(device_id)
+        self.server.last_seen.setdefault(device_id, time.time())
+        self._queue_for(device_id).put(command)
+        print(f"Command queued: device={device_id} cmd_id={command['cmd_id']} type={command['type']}", flush=True)
 
     def _handle_upload_image(self, body: bytes):
         if not body:
@@ -231,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
             data=audio,
             method="POST",
             headers={
-                "X-NLS-Token": self.server.token,
+                "X-NLS-Token": self.server.get_token(),
                 "Content-Type": "application/octet-stream",
             },
         )
@@ -317,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
         started = time.perf_counter()
         params = {
             "appkey": self.server.appkey,
-            "token": self.server.token,
+            "token": self.server.get_token(),
             "text": text,
             "format": "pcm",
             "sample_rate": self.server.sample_rate,
@@ -358,6 +509,151 @@ def required_env(name: str) -> str:
     if not value:
         raise SystemExit(f"Missing {name}. Export it before starting this service.")
     return value
+
+
+def optional_env(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def load_dotenv(path: str) -> None:
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as fp:
+        for raw_line in fp:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def percent_encode(value: str) -> str:
+    return urllib.parse.quote(value, safe="-_.~")
+
+
+def create_aliyun_nls_token(access_key_id: str, access_key_secret: str) -> tuple[str, int]:
+    timestamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params = {
+        "AccessKeyId": access_key_id,
+        "Action": "CreateToken",
+        "Format": "JSON",
+        "RegionId": TOKEN_REGION_ID,
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": str(uuid.uuid4()),
+        "SignatureVersion": "1.0",
+        "Timestamp": timestamp,
+        "Version": TOKEN_API_VERSION,
+    }
+    canonical_query = "&".join(
+        f"{percent_encode(key)}={percent_encode(params[key])}" for key in sorted(params)
+    )
+    string_to_sign = "GET&%2F&" + percent_encode(canonical_query)
+    digest = hmac.new(
+        (access_key_secret + "&").encode("utf-8"),
+        string_to_sign.encode("utf-8"),
+        hashlib.sha1,
+    ).digest()
+    signature = base64.b64encode(digest).decode("ascii")
+    query = "Signature=" + percent_encode(signature) + "&" + canonical_query
+    url = TOKEN_META_ENDPOINT + "?" + query
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Aliyun CreateToken HTTP {exc.code}: {detail}") from exc
+
+    token = payload.get("Token", {})
+    token_id = token.get("Id", "")
+    expire_time = int(token.get("ExpireTime", 0) or 0)
+    if not token_id or not expire_time:
+        raise RuntimeError(f"Aliyun CreateToken returned no token: {payload}")
+    return token_id, expire_time
+
+
+def first_value(query: dict, key: str) -> str:
+    value = query.get(key, [""])
+    if isinstance(value, list):
+        return value[0] if value else ""
+    return str(value)
+
+
+def parse_bool(value: str) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def safe_device_id(device_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(device_id).strip())[:64]
+    return safe or "default"
+
+
+def is_placeholder_device_id(device_id: str) -> bool:
+    value = str(device_id).strip().upper()
+    return value in ("", "DEFAULT", "AA:BB:CC:DD:EE:FF", "AABBCCDDEEFF")
+
+
+def latest_seen_device_id(last_seen: dict[str, float]) -> str:
+    if not last_seen:
+        return "default"
+    return max(last_seen.items(), key=lambda item: item[1])[0]
+
+
+def make_command(command_type: str, payload, priority: int = 0, interrupt: bool = False) -> dict:
+    return {
+        "cmd_id": f"cmd_{uuid.uuid4().hex[:12]}",
+        "type": command_type,
+        "priority": priority,
+        "interrupt": interrupt,
+        "payload": payload,
+        "created_at": time.time(),
+    }
+
+
+def command_payload_from_query(command_type: str, query: dict):
+    if command_type == "face":
+        return {"expression": first_value(query, "expression") or first_value(query, "face") or "happy"}
+    if command_type == "speak":
+        return {"text": first_value(query, "text") or "你好呀"}
+    if command_type == "play_audio":
+        return {"url": first_value(query, "url")}
+    if command_type in ("motion", "move"):
+        motion_type = first_value(query, "type") or first_value(query, "action") or first_value(query, "direction")
+        if motion_type:
+            return {
+                "type": motion_type,
+                "degree": float(first_value(query, "degree") or first_value(query, "degrees") or "15"),
+                "duration_ms": int(first_value(query, "duration_ms") or "500"),
+            }
+        return {
+            "pan": float(first_value(query, "pan") or "0"),
+            "tilt": float(first_value(query, "tilt") or "45"),
+            "duration_ms": int(first_value(query, "duration_ms") or "500"),
+        }
+    if command_type == "stop":
+        return {}
+    if command_type == "sequence":
+        raw = first_value(query, "payload") or first_value(query, "steps")
+        if raw:
+            try:
+                payload = json.loads(raw)
+                if isinstance(payload, list):
+                    return payload
+            except json.JSONDecodeError:
+                pass
+        text = first_value(query, "text")
+        expression = first_value(query, "expression") or "happy"
+        steps = [{"type": "face", "expression": expression}]
+        if text:
+            steps.append({"type": "speak", "text": text})
+        return steps
+    return {key: values[0] for key, values in query.items() if values}
 
 
 def rgb565_to_bmp(rgb565: bytes, width: int, height: int) -> bytes:
@@ -467,6 +763,8 @@ def detect_and_visualize_faces(image_path: str, output_path: str) -> tuple[str, 
 
 
 def main():
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+
     parser = argparse.ArgumentParser(description="Local Stack-chan bridge for Aliyun ASR and PCM streaming TTS.")
     parser.add_argument("--host", default=os.environ.get("STACKCHAN_ALIYUN_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_PORT", "8091")))
@@ -486,7 +784,18 @@ def main():
     args = parser.parse_args()
 
     httpd = AliyunVoiceServer((args.host, args.port), Handler)
-    httpd.token = required_env("ALIYUN_NLS_TOKEN")
+    httpd.access_key_id = optional_env("ALIYUN_AK_ID", "ALIYUN_ACCESS_KEY_ID")
+    httpd.access_key_secret = optional_env("ALIYUN_AK_SECRET", "ALIYUN_ACCESS_KEY_SECRET")
+    httpd.token = optional_env("ALIYUN_NLS_TOKEN")
+    httpd.token_expire_time = int(optional_env("ALIYUN_NLS_TOKEN_EXPIRE_TIME") or "0")
+    if not httpd.token and (not httpd.access_key_id or not httpd.access_key_secret):
+        raise SystemExit(
+            "Missing Aliyun credentials. Set ALIYUN_NLS_TOKEN, or set ALIYUN_AK_ID and ALIYUN_AK_SECRET."
+        )
+    if not httpd.token:
+        httpd.token, httpd.token_expire_time = create_aliyun_nls_token(
+            httpd.access_key_id, httpd.access_key_secret
+        )
     httpd.appkey = required_env("ALIYUN_NLS_APPKEY")
     httpd.asr_url = ASR_URLS[args.region]
     httpd.tts_url = args.tts_url or TTS_URLS[args.region]
@@ -501,12 +810,18 @@ def main():
     httpd.tts_request_timeout = args.tts_request_timeout
     httpd.tts_retries = args.tts_retries
     httpd.capture_dir = args.capture_dir
+    httpd.device_queues = {}
+    httpd.last_ack = {}
+    httpd.last_seen = {}
 
     print("Stack-chan Aliyun voice bridge")
     print(f"  health: http://127.0.0.1:{args.port}/health")
     print(f"  ASR:    http://{args.host}:{args.port}/upload")
     print(f"  TTS:    http://{args.host}:{args.port}/stream-speak?text=...")
     print(f"  Image:  http://{args.host}:{args.port}/upload-image -> {args.capture_dir}")
+    print(f"  Command push via HTTP long poll:")
+    print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")
+    print(f"          send:   GET http://{args.host}:{args.port}/command/speak?device_id=...&text=...")
     print(f"  voice:  {args.voice}, pcm_s16le {args.sample_rate}Hz mono")
     httpd.serve_forever()
 

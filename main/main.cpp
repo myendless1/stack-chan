@@ -44,6 +44,9 @@ void run_camera_upload_app();
 void run_tracking_user_demo();
 static bool wifi_is_connected();
 
+extern const uint8_t happy_face_png_start[] asm("_binary_happy_face_png_start");
+extern const uint8_t happy_face_png_end[] asm("_binary_happy_face_png_end");
+
 namespace {
 
 enum class AppId {
@@ -77,6 +80,7 @@ static constexpr int kLauncherAppCount = 5;
 static constexpr uint32_t kWifiTaskStackBytes = 8 * 1024;
 static constexpr uint32_t kApp1TaskStackBytes = 24 * 1024;
 static constexpr uint32_t kApp2TaskStackBytes = 16 * 1024;
+static constexpr uint32_t kCommandTaskStackBytes = 16 * 1024;
 static constexpr uint32_t kCameraTaskStackBytes = 16 * 1024;
 static constexpr uint32_t kTrackingTaskStackBytes = 20 * 1024;
 static constexpr size_t kTtsMaxBytes = CONFIG_STACKCHAN_TTS_MAX_BYTES;
@@ -121,6 +125,8 @@ TaskHandle_t xiaozhi_task_handle = nullptr;
 TaskHandle_t stream_tts_task_handle = nullptr;
 TaskHandle_t camera_upload_task_handle = nullptr;
 TaskHandle_t tracking_task_handle = nullptr;
+TaskHandle_t command_task_handle = nullptr;
+TaskHandle_t boot_task_handle = nullptr;
 EventGroupHandle_t wifi_event_group = nullptr;
 SemaphoreHandle_t m5_mutex = nullptr;
 int wifi_retry_count = 0;
@@ -129,6 +135,8 @@ volatile bool wifi_manual_switching = false;
 volatile bool app1_stop_requested = false;
 volatile bool app2_stop_requested = false;
 volatile bool tracking_stop_requested = false;
+volatile bool voice_listener_paused = false;
+volatile bool voice_status_screen_suppressed = false;
 bool camera_initialized = false;
 volatile bool camera_owns_internal_i2c = false;
 bool servo_uart_initialized = false;
@@ -136,7 +144,7 @@ float tracking_yaw_deg = 0.0f;
 float tracking_pitch_deg = kTrackingHomePitchDeg;
 char client_id[37] = {};
 std::string active_wifi_ssid = CONFIG_STACKCHAN_WIFI_SSID;
-std::string active_server_base = "http://192.168.21.55:8091";
+std::string active_server_base = "http://192.168.21.15:8091";
 bool active_server_selected = false;
 
 struct WifiCandidate {
@@ -150,8 +158,22 @@ static constexpr WifiCandidate kWifiCandidates[] = {
 };
 
 static constexpr const char* kServerBaseCandidates[] = {
-    "http://192.168.21.55:8091",
+    "http://192.168.21.15:8091",
+    "http://172.24.77.83:8091",
     "http://192.168.137.1:8091",
+};
+
+struct ExpressionAsset {
+    const char* name;
+    const uint8_t* start;
+    const uint8_t* end;
+    int width;
+    int height;
+};
+
+static constexpr const char* kDefaultExpression = "happy";
+static const ExpressionAsset kExpressionAssets[] = {
+    {"happy", happy_face_png_start, happy_face_png_end, 320, 240},
 };
 
 struct XiaozhiConfig {
@@ -391,6 +413,9 @@ void set_app1_status(const char* stage, const char* line1, const char* line2 = "
     app1_status.success = success;
     ESP_LOGI(TAG, "APP1 status: %s | %s | %s | %s", app1_status.stage, app1_status.line1, app1_status.line2,
              app1_status.line3);
+    if (voice_status_screen_suppressed) {
+        return;
+    }
     M5Lock lock;
     draw_app1_status();
 }
@@ -421,6 +446,9 @@ void set_tts_status(const char* stage, const char* line1, const char* line2 = ""
     tts_status.success = success;
     ESP_LOGI(TAG, "TTS status: %s | %s | %s | %s", tts_status.stage, tts_status.line1, tts_status.line2,
              tts_status.line3);
+    if (voice_status_screen_suppressed) {
+        return;
+    }
     M5Lock lock;
     draw_tts_status();
 }
@@ -1195,6 +1223,14 @@ static bool ensure_server_selected()
     return false;
 }
 
+static bool ensure_network_ready()
+{
+    if (!ensure_wifi_connected(true)) {
+        return false;
+    }
+    return ensure_server_selected();
+}
+
 static std::string make_system_info_json()
 {
     const esp_app_desc_t* app = esp_app_get_description();
@@ -1615,7 +1651,7 @@ static std::vector<uint8_t> make_wav_bytes(const std::vector<int16_t>& pcm)
 static bool upload_wav_recording(const std::vector<int16_t>& pcm)
 {
     std::vector<uint8_t> wav = make_wav_bytes(pcm);
-    std::string upload_url = make_server_url("/upload");
+    std::string upload_url = make_server_url("/upload-audio");
     ESP_LOGI(TAG, "Uploading WAV to %s, samples=%u bytes=%u", upload_url.c_str(),
              static_cast<unsigned>(pcm.size()), static_cast<unsigned>(wav.size()));
     ESP_LOGI(TAG, "APP1 stack high water=%u bytes, free heap=%u, min free heap=%u",
@@ -1705,12 +1741,7 @@ static bool upload_wav_recording(const std::vector<int16_t>& pcm)
         }
 
         if (!stt_text.empty()) {
-            set_app1_status("Recognized", stt_text.c_str(), "Listening again...", "", false, true);
-            {
-                M5Lock lock;
-                show_recognition_text("Aliyun STT", stt_text.c_str());
-            }
-            vTaskDelay(pdMS_TO_TICKS(3500));
+            ESP_LOGI(TAG, "Background ASR text: %s", stt_text.c_str());
         } else {
             char line[96];
             snprintf(line, sizeof(line), "samples=%u wav=%u bytes", static_cast<unsigned>(pcm.size()),
@@ -1788,11 +1819,9 @@ static std::vector<int16_t> record_pcm_after_trigger(const std::vector<int16_t>&
 static void run_local_record_upload_loop()
 {
     ensure_client_id();
-    if (!ensure_wifi_connected()) {
-        return;
-    }
-    if (!ensure_server_selected()) {
-        return;
+    while (!wifi_is_connected() || !active_server_selected) {
+        set_app1_status("Waiting", "Network is starting", "Listening starts soon", "", true, false);
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     M5.Speaker.end();
@@ -1808,7 +1837,7 @@ static void run_local_record_upload_loop()
         return;
     }
 
-    set_app1_status("Ready", "Local recording upload", make_server_url("/upload").c_str(), "", false, true);
+    set_app1_status("Ready", "Listening", make_server_url("/upload-audio").c_str(), "", false, true);
     std::vector<int16_t> probe(kVoiceProbeSamples);
     std::vector<int16_t> pre_roll;
     pre_roll.reserve(kPreRollSamples + kVoiceProbeSamples);
@@ -1816,6 +1845,31 @@ static void run_local_record_upload_loop()
     int32_t smooth_level = 0;
 
     while (!app1_stop_requested) {
+        if (voice_listener_paused) {
+            if (M5.Mic.isEnabled()) {
+                while (M5.Mic.isRecording()) {
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                }
+                M5.Mic.end();
+            }
+            set_app1_status("Paused", "Executing command", "Listening resumes soon", "", true, false);
+            while (voice_listener_paused && !app1_stop_requested) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            if (app1_stop_requested) {
+                break;
+            }
+            M5.Mic.config(mic_cfg);
+            if (!M5.Mic.isEnabled() && !M5.Mic.begin()) {
+                set_app1_status("Mic Fail", "M5.Mic.begin failed", "", "", false, false);
+                ESP_LOGE(TAG, "M5.Mic.begin failed after pause");
+                break;
+            }
+            pre_roll.clear();
+            smooth_level = 0;
+            last_status_ms = 0;
+            set_app1_status("Listening", "Resumed", "Speak to upload", "", true, false);
+        }
         if (!mic_record_blocking(probe.data(), probe.size(), kRecordSampleRate)) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -1969,12 +2023,17 @@ static std::string make_tts_url()
     return url;
 }
 
-static std::string make_stream_tts_url()
+static std::string make_stream_tts_url_for_text(const char* text)
 {
     std::string url = make_server_url("/stream-speak");
     url += (url.find('?') == std::string::npos) ? "?text=" : "&text=";
-    url += url_encode(CONFIG_STACKCHAN_TTS_TEXT);
+    url += url_encode(text != nullptr ? text : "");
     return url;
+}
+
+static std::string make_stream_tts_url()
+{
+    return make_stream_tts_url_for_text(CONFIG_STACKCHAN_TTS_TEXT);
 }
 
 static bool init_camera_once()
@@ -2789,11 +2848,11 @@ static bool play_stream_pcm_chunk(const int16_t* samples, size_t sample_count)
     return true;
 }
 
-static bool stream_tts_pcm()
+static bool stream_tts_pcm_for_text(const char* text)
 {
-    std::string url = make_stream_tts_url();
+    std::string url = make_stream_tts_url_for_text(text);
     ESP_LOGI(TAG, "Stream TTS URL: %s", url.c_str());
-    set_tts_status("Requesting", make_server_url("/stream-speak").c_str(), CONFIG_STACKCHAN_TTS_TEXT);
+    set_tts_status("Requesting", make_server_url("/stream-speak").c_str(), text != nullptr ? text : "");
 
     esp_http_client_config_t config = {};
     config.url = url.c_str();
@@ -2916,6 +2975,11 @@ static bool stream_tts_pcm()
     return true;
 }
 
+static bool stream_tts_pcm()
+{
+    return stream_tts_pcm_for_text(CONFIG_STACKCHAN_TTS_TEXT);
+}
+
 void run_stream_tts_demo()
 {
     ensure_client_id();
@@ -2940,6 +3004,314 @@ void run_stream_tts_demo()
     stream_tts_pcm();
 }
 
+static bool http_get_string(const std::string& url, std::string* response, int timeout_ms)
+{
+    esp_http_client_config_t config = {};
+    config.url = url.c_str();
+    config.method = HTTP_METHOD_GET;
+    config.timeout_ms = timeout_ms;
+    config.buffer_size = kHttpBufferSize;
+    config.buffer_size_tx = kHttpBufferSize;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) {
+        return false;
+    }
+
+    esp_http_client_set_header(client, "Accept", "application/json");
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP GET open failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    if (response != nullptr) {
+        char buffer[512];
+        while (response->size() < 4096) {
+            int read_len = esp_http_client_read(client, buffer, sizeof(buffer) - 1);
+            if (read_len <= 0) {
+                break;
+            }
+            response->append(buffer, read_len);
+            if (content_length > 0 && static_cast<int>(response->size()) >= content_length) {
+                break;
+            }
+        }
+    }
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    ESP_LOGI(TAG, "HTTP GET %s -> status=%d content_length=%d response_len=%u", url.c_str(), status, content_length,
+             response != nullptr ? static_cast<unsigned>(response->size()) : 0);
+    return status >= 200 && status < 300;
+}
+
+static double json_number_value(const cJSON* root, const char* key, double default_value)
+{
+    const cJSON* value = cJSON_GetObjectItemCaseSensitive(root, key);
+    return cJSON_IsNumber(value) ? value->valuedouble : default_value;
+}
+
+static bool send_command_ack(const char* cmd_id, const char* status, const char* message = "")
+{
+    std::string url = make_server_url("/device/ack");
+    url += "?device_id=";
+    url += url_encode(mac_address().c_str());
+    url += "&cmd_id=";
+    url += url_encode(cmd_id != nullptr ? cmd_id : "");
+    url += "&status=";
+    url += url_encode(status != nullptr ? status : "received");
+    if (message != nullptr && message[0] != '\0') {
+        url += "&message=";
+        url += url_encode(message);
+    }
+    std::string response;
+    return http_get_string(url, &response, 5000);
+}
+
+static const ExpressionAsset* find_expression_asset(const char* expression)
+{
+    const char* name = expression != nullptr && expression[0] != '\0' ? expression : kDefaultExpression;
+    if (strcmp(name, "listening") == 0 || strcmp(name, "default") == 0 || strcmp(name, "stopped") == 0) {
+        name = kDefaultExpression;
+    }
+
+    for (const auto& asset : kExpressionAssets) {
+        if (strcmp(asset.name, name) == 0) {
+            return &asset;
+        }
+    }
+
+    for (const auto& asset : kExpressionAssets) {
+        if (strcmp(asset.name, kDefaultExpression) == 0) {
+            return &asset;
+        }
+    }
+    return nullptr;
+}
+
+static void show_expression(const char* expression)
+{
+    {
+        M5Lock lock;
+        auto& display = M5.Display;
+        const ExpressionAsset* asset = find_expression_asset(expression);
+        if (asset != nullptr) {
+            display.fillScreen(TFT_BLACK);
+            const uint32_t image_len = static_cast<uint32_t>(asset->end - asset->start);
+            if (display.drawPng(asset->start, image_len,
+                                (display.width() - asset->width) / 2, (display.height() - asset->height) / 2)) {
+                return;
+            }
+        }
+        display.fillScreen(TFT_BLACK);
+    }
+}
+
+static bool execute_speak_command(const char* text)
+{
+    if (text == nullptr || text[0] == '\0') {
+        return true;
+    }
+
+    voice_listener_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(160));
+    while (M5.Mic.isRecording()) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    M5.Mic.end();
+
+    if (!M5.Speaker.begin()) {
+        ESP_LOGE(TAG, "M5.Speaker.begin failed for command speak");
+        voice_listener_paused = false;
+        return false;
+    }
+    M5.Speaker.setVolume(CONFIG_STACKCHAN_TTS_VOLUME);
+    app2_stop_requested = false;
+    bool ok = stream_tts_pcm_for_text(text);
+    M5.Speaker.end();
+    voice_listener_paused = false;
+    return ok;
+}
+
+static bool execute_command_object(const cJSON* command)
+{
+    if (!cJSON_IsObject(command)) {
+        return false;
+    }
+
+    std::string type = json_string_value(command, "type");
+    const cJSON* payload = cJSON_GetObjectItemCaseSensitive(command, "payload");
+    if (!cJSON_IsObject(payload) && !cJSON_IsArray(payload)) {
+        payload = command;
+    }
+
+    if (type == "face") {
+        std::string expression = json_string_value(payload, "expression");
+        show_expression(expression.empty() ? "happy" : expression.c_str());
+        return true;
+    }
+    if (type == "speak") {
+        std::string text = json_string_value(payload, "text");
+        return execute_speak_command(text.c_str());
+    }
+    if (type == "motion" || type == "move") {
+        std::string motion_type = json_string_value(payload, "type");
+        if (motion_type == "motion" || motion_type == "move") {
+            motion_type.clear();
+        }
+        if (motion_type.empty()) {
+            motion_type = json_string_value(payload, "action");
+        }
+        if (motion_type.empty()) {
+            motion_type = json_string_value(payload, "direction");
+        }
+        float degree = static_cast<float>(json_number_value(payload, "degree", json_number_value(payload, "degrees", 15)));
+        float pan = static_cast<float>(json_number_value(payload, "pan", tracking_yaw_deg));
+        float tilt = static_cast<float>(json_number_value(payload, "tilt", tracking_pitch_deg));
+        int duration_ms = static_cast<int>(json_number_value(payload, "duration_ms", 500));
+
+        if (motion_type == "left") {
+            pan = tracking_yaw_deg - degree;
+            tilt = tracking_pitch_deg;
+        } else if (motion_type == "right") {
+            pan = tracking_yaw_deg + degree;
+            tilt = tracking_pitch_deg;
+        } else if (motion_type == "up") {
+            pan = tracking_yaw_deg;
+            tilt = tracking_pitch_deg + degree;
+        } else if (motion_type == "down") {
+            pan = tracking_yaw_deg;
+            tilt = tracking_pitch_deg - degree;
+        } else if (motion_type == "center" || motion_type == "home") {
+            pan = 0.0f;
+            tilt = kTrackingHomePitchDeg;
+        }
+        return move_head_to_tracking_angles(pan, tilt, duration_ms);
+    }
+    if (type == "sequence") {
+        if (!cJSON_IsArray(payload)) {
+            return false;
+        }
+        const int count = cJSON_GetArraySize(payload);
+        for (int i = 0; i < count; ++i) {
+            const cJSON* step = cJSON_GetArrayItem(payload, i);
+            if (!execute_command_object(step)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (type == "stop") {
+        app2_stop_requested = true;
+        M5.Speaker.stop();
+        show_expression("stopped");
+        return true;
+    }
+    if (type == "play_audio") {
+        ESP_LOGW(TAG, "play_audio command is not implemented yet");
+        return false;
+    }
+
+    ESP_LOGW(TAG, "Unknown command type: %s", type.c_str());
+    return false;
+}
+
+static bool handle_command_response(const std::string& response)
+{
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "Command response is not JSON: %s", response.c_str());
+        return false;
+    }
+
+    std::string response_type = json_string_value(root, "type");
+    if (response_type == "noop") {
+        cJSON_Delete(root);
+        return true;
+    }
+    if (response_type != "command") {
+        ESP_LOGW(TAG, "Unexpected command response type: %s", response_type.c_str());
+        cJSON_Delete(root);
+        return false;
+    }
+
+    const cJSON* command = cJSON_GetObjectItemCaseSensitive(root, "command");
+    std::string cmd_id = json_string_value(command, "cmd_id");
+    std::string cmd_type = json_string_value(command, "type");
+    ESP_LOGI(TAG, "Command received: id=%s type=%s", cmd_id.c_str(), cmd_type.c_str());
+    send_command_ack(cmd_id.c_str(), "received");
+    bool ok = execute_command_object(command);
+    send_command_ack(cmd_id.c_str(), ok ? "done" : "failed");
+    cJSON_Delete(root);
+    return ok;
+}
+
+static void run_command_http_loop()
+{
+    ensure_client_id();
+    while (!wifi_is_connected() || !active_server_selected) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    show_expression(kDefaultExpression);
+
+    while (true) {
+        std::string url = make_server_url("/device/next-command");
+        url += "?device_id=";
+        url += url_encode(mac_address().c_str());
+        url += "&timeout=25";
+        std::string response;
+        if (http_get_string(url, &response, 35000) && !response.empty()) {
+            handle_command_response(response);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+}
+
+static void start_background_services()
+{
+    current_app = AppId::VoiceDemo;
+    voice_status_screen_suppressed = true;
+    show_expression(kDefaultExpression);
+    set_app1_status("Booting", "Connecting WiFi", "Starting background services", "", true, false);
+
+    if (boot_task_handle != nullptr) {
+        return;
+    }
+
+    xTaskCreatePinnedToCore([](void*) {
+        ensure_client_id();
+        while (!ensure_network_ready()) {
+            set_app1_status("Retrying", "WiFi or server not ready", "Will retry in 3 seconds", "", true, false);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        }
+
+        show_expression(kDefaultExpression);
+
+        if (xiaozhi_task_handle == nullptr) {
+            app1_stop_requested = false;
+            xTaskCreatePinnedToCore([](void*) {
+                run_xiaozhi_ota_probe();
+                xiaozhi_task_handle = nullptr;
+            }, "bg_voice", kApp1TaskStackBytes, nullptr, 3, &xiaozhi_task_handle, 1);
+        }
+
+        if (command_task_handle == nullptr) {
+            xTaskCreatePinnedToCore([](void*) {
+                run_command_http_loop();
+                command_task_handle = nullptr;
+            }, "bg_command", kCommandTaskStackBytes, nullptr, 3, &command_task_handle, 0);
+        }
+
+        boot_task_handle = nullptr;
+        vTaskDelete(nullptr);
+    }, "bg_boot", kWifiTaskStackBytes, nullptr, 4, &boot_task_handle, 1);
+
+}
+
 extern "C" void app_main(void)
 {
     ESP_ERROR_CHECK(init_nvs_once());
@@ -2955,7 +3327,7 @@ extern "C" void app_main(void)
     M5.Touch.setHoldThresh(500);
     M5.Touch.setFlickThresh(12);
 
-    enter_app(AppId::Launcher);
+    start_background_services();
 
     while (true) {
         {
@@ -2963,27 +3335,6 @@ extern "C" void app_main(void)
             if (!camera_owns_internal_i2c) {
                 M5.update();
             }
-        }
-
-        switch (current_app) {
-        case AppId::Launcher:
-            update_launcher();
-            break;
-        case AppId::WifiConnect:
-            update_wifi_connect();
-            break;
-        case AppId::VoiceDemo:
-            update_voice_demo();
-            break;
-        case AppId::StreamTtsDemo:
-            update_stream_tts_demo();
-            break;
-        case AppId::CameraUpload:
-            update_camera_upload();
-            break;
-        case AppId::TrackingUser:
-            update_tracking_user();
-            break;
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));

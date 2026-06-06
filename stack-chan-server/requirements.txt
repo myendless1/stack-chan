@@ -1,3 +1,2 @@
-setuptools<81
-pillow
-face_recognition
+# Required runtime dependencies.
+# The default ASR/TTS/command server uses only Python standard library modules.

@@ -1,0 +1,72 @@
+menu "Stack-chan settings"
+
+    config STACKCHAN_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config STACKCHAN_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config STACKCHAN_XIAOZHI_OTA_URL
+        string "Xiaozhi OTA URL"
+        default "https://api.tenclass.net/xiaozhi/ota/"
+
+    config STACKCHAN_RECORD_UPLOAD_URL
+        string "Record upload URL"
+        default "http://192.168.21.15:8091/upload"
+
+    config STACKCHAN_STREAM_TTS_URL
+        string "Stream TTS URL"
+        default "http://192.168.21.15:8091/stream-speak"
+
+    config STACKCHAN_TTS_URL
+        string "TTS URL"
+        default "http://192.168.21.15:8091/speak?text="
+
+    config STACKCHAN_TTS_TEXT
+        string "TTS text"
+        default "Hello, I am Stack-chan"
+
+    config STACKCHAN_TTS_VOLUME
+        int "TTS volume"
+        default 180
+        range 0 255
+
+    config STACKCHAN_TTS_MAX_BYTES
+        int "TTS max bytes"
+        default 2097152
+
+    config STACKCHAN_RECORD_SAMPLE_RATE
+        int "Record sample rate"
+        default 16000
+
+    config STACKCHAN_RECORD_CHUNK_MS
+        int "Record chunk milliseconds"
+        default 40
+
+    config STACKCHAN_PREROLL_MS
+        int "Pre-roll milliseconds"
+        default 800
+
+    config STACKCHAN_VOICE_START_THRESHOLD
+        int "Voice start threshold"
+        default 550
+
+    config STACKCHAN_VOICE_STOP_THRESHOLD
+        int "Voice stop threshold"
+        default 260
+
+    config STACKCHAN_MIC_MAGNIFICATION
+        int "Microphone magnification"
+        default 8
+
+    config STACKCHAN_RECORD_MAX_MS
+        int "Record max milliseconds"
+        default 15000
+
+    config STACKCHAN_SILENCE_STOP_MS
+        int "Silence stop milliseconds"
+        default 1300
+
+endmenu

@@ -275,7 +275,7 @@ void setup(void)
   case m5::board_t::board_M5AtomS3R:        name = "ATOMS3R";        break;
   case m5::board_t::board_M5AtomS3RCam:     name = "ATOMS3R Camera"; break;
   case m5::board_t::board_M5AtomS3RExt:     name = "ATOMS3R Ext";    break;
-  case m5::board_t::board_M5AtomEchoS3R:    name = "ATOM ECHO S3R";  break;
+  case m5::board_t::board_M5AtomVoiceS3R:   name = "ATOM Voice S3R"; break;
   case m5::board_t::board_M5Dial:           name = "Dial";           break;
   case m5::board_t::board_M5DinMeter:       name = "DinMeter";       break;
   case m5::board_t::board_M5Capsule:        name = "Capsule";        break;
@@ -284,6 +284,9 @@ void setup(void)
   case m5::board_t::board_M5VAMeter:        name = "VAMeter";        break;
   case m5::board_t::board_M5PaperS3:        name = "PaperS3";        break;
   case m5::board_t::board_M5PowerHub:       name = "PowerHub";       break;
+  case m5::board_t::board_M5PaperColor:     name = "PaperColor";     break;
+  case m5::board_t::board_M5PaperMono:      name = "PaperMono";      break;
+  case m5::board_t::board_M5StopWatch:      name = "StopWatch";      break;
 #elif defined (CONFIG_IDF_TARGET_ESP32C3)
   case m5::board_t::board_M5StampC3:        name = "StampC3";        break;
   case m5::board_t::board_M5StampC3U:       name = "StampC3U";       break;
@@ -291,6 +294,8 @@ void setup(void)
   case m5::board_t::board_M5NanoC6:         name = "NanoC6";         break;
   case m5::board_t::board_M5UnitC6L:        name = "UnitC6L";        break;
   case m5::board_t::board_ArduinoNessoN1:   name = "NessoN1";        break;
+#elif defined (CONFIG_IDF_TARGET_ESP32H2)
+  case m5::board_t::board_NanoH2:           name = "NanoH2";         break;
 #elif defined (CONFIG_IDF_TARGET_ESP32P4)
   case m5::board_t::board_M5Tab5:           name = "Tab5";           break;
 #else
@@ -305,7 +310,7 @@ void setup(void)
   case m5::board_t::board_M5Station:        name = "Station";        break;
   case m5::board_t::board_M5AtomLite:       name = "ATOM Lite";      break;
   case m5::board_t::board_M5AtomMatrix:     name = "ATOM Matrix";    break;
-  case m5::board_t::board_M5AtomEcho:       name = "ATOM ECHO";      break;
+  case m5::board_t::board_M5AtomVoice:      name = "ATOM Voice";     break;
   case m5::board_t::board_M5AtomPsram:      name = "ATOM PSRAM";     break;
   case m5::board_t::board_M5AtomU:          name = "ATOM U";         break;
   case m5::board_t::board_M5TimerCam:       name = "TimerCamera";    break;

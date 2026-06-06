@@ -7,24 +7,50 @@ HOST="${STACKCHAN_SERVER_HOST:-${STACKCHAN_ALIYUN_HOST:-0.0.0.0}}"
 PORT="${STACKCHAN_SERVER_PORT:-${STACKCHAN_ALIYUN_PORT:-8091}}"
 VENV="${STACKCHAN_SERVER_VENV:-.venv}"
 LOG_FILE="${STACKCHAN_SERVER_LOG:-/tmp/stack-chan-server.log}"
+PIP_INDEX_URL="${STACKCHAN_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+PIP_TRUSTED_HOST="${STACKCHAN_PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
+
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
 
 if [ ! -x "$VENV/bin/python" ]; then
   python3 -m venv "$VENV"
 fi
 
-if ! "$VENV/bin/python" - <<'PY' >/dev/null 2>&1
-import face_recognition
-from PIL import Image
-PY
-then
-  "$VENV/bin/python" -m pip install -r requirements.txt
+has_requirements() {
+  grep -Ev '^[[:space:]]*(#|$)' "$1" >/dev/null 2>&1
+}
+
+pip_install() {
+  env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    "$VENV/bin/python" -m pip install \
+      -i "$PIP_INDEX_URL" \
+      --trusted-host "$PIP_TRUSTED_HOST" \
+      -r "$1"
+}
+
+if has_requirements requirements.txt; then
+  pip_install requirements.txt
 fi
 
-if [ -z "${ALIYUN_NLS_TOKEN:-}" ] || [ -z "${ALIYUN_NLS_APPKEY:-}" ]; then
+if ! "$VENV/bin/python" - <<'PY' >/dev/null 2>&1
+import face_recognition
+PY
+then
+  echo "Optional face_recognition is not installed; image upload works, face boxes are disabled." >&2
+  echo "Install it later with: env -u http_proxy -u https_proxy -u all_proxy $VENV/bin/python -m pip install -i $PIP_INDEX_URL --trusted-host $PIP_TRUSTED_HOST -r requirements-face.txt" >&2
+fi
+
+if { [ -z "${ALIYUN_NLS_TOKEN:-}" ] && { [ -z "${ALIYUN_AK_ID:-}" ] || [ -z "${ALIYUN_AK_SECRET:-}" ]; }; } || [ -z "${ALIYUN_NLS_APPKEY:-}" ]; then
   echo "Missing Aliyun credentials." >&2
-  echo "Run:" >&2
-  echo "  export ALIYUN_NLS_TOKEN='...'" >&2
-  echo "  export ALIYUN_NLS_APPKEY='...'" >&2
+  echo "Set these in stack-chan-server/.env or export them:" >&2
+  echo "  ALIYUN_AK_ID='...'" >&2
+  echo "  ALIYUN_AK_SECRET='...'" >&2
+  echo "  ALIYUN_NLS_APPKEY='...'" >&2
+  echo "Alternatively set ALIYUN_NLS_TOKEN instead of ALIYUN_AK_ID/ALIYUN_AK_SECRET." >&2
   exit 1
 fi
 

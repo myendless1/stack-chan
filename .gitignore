@@ -1,0 +1,8 @@
+.venv/
+.uv-cache/
+.cache/
+.espressif/
+esp-idf/
+build/
+.env
+stack-chan-server/.env

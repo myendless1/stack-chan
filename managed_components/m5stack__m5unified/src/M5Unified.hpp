@@ -37,10 +37,12 @@ namespace m5
     port_d_pin2,   port_d_txd = port_d_pin2,  port_b2_pin2 = port_d_pin2,
     port_e_pin1,   port_e_rxd = port_e_pin1,  port_c2_pin1 = port_e_pin1,
     port_e_pin2,   port_e_txd = port_e_pin2,  port_c2_pin2 = port_e_pin2,
-    sd_spi_sclk,
-    sd_spi_copi,   sd_spi_mosi = sd_spi_copi,
-    sd_spi_cipo,   sd_spi_miso = sd_spi_cipo,
-    sd_spi_cs,     sd_spi_ss  = sd_spi_cs,
+    sd_mmc_clk,    sd_spi_sclk = sd_mmc_clk,
+    sd_mmc_cmd,    sd_spi_copi = sd_mmc_cmd,  sd_spi_mosi = sd_mmc_cmd,
+    sd_mmc_d0,     sd_spi_cipo = sd_mmc_d0,  sd_spi_miso = sd_mmc_d0,
+    sd_mmc_d1,
+    sd_mmc_d2,
+    sd_mmc_d3,     sd_spi_cs   = sd_mmc_d3,  sd_spi_ss   = sd_mmc_d3,
     rgb_led,
     power_hold,
     mbus_pin1, mbus_pin2, mbus_pin3, mbus_pin4, mbus_pin5,
@@ -349,7 +351,7 @@ namespace m5
         res = Display.init_without_reset(false);
       }
       auto board = _check_boardtype(Display.getBoard());
-      printf("auto detect board:%d\n",board);
+      // printf("auto detect board:%d\n",board);
       if (board == board_t::board_unknown) { board = cfg.fallback_board; }
       _board = board;
       _setup_pinmap(board);
@@ -362,9 +364,9 @@ namespace m5
 #if defined ( __M5GFX_M5ATOMDISPLAY__ )
       if (cfg.external_display.atom_display) {
 #if defined (CONFIG_IDF_TARGET_ESP32S3)
-        if (_board == board_t::board_M5AtomS3 || _board == board_t::board_M5AtomS3Lite || _board == board_t::board_M5AtomS3R || _board == board_t::board_M5AtomS3RCam || _board == board_t::board_M5AtomS3RExt || _board == board_t::board_M5AtomEchoS3R)
+        if (_board == board_t::board_M5AtomS3 || _board == board_t::board_M5AtomS3Lite || _board == board_t::board_M5AtomS3R || _board == board_t::board_M5AtomS3RCam || _board == board_t::board_M5AtomS3RExt || _board == board_t::board_M5AtomVoiceS3R)
 #elif !defined (CONFIG_IDF_TARGET) || defined (CONFIG_IDF_TARGET_ESP32)
-        if (_board == board_t::board_M5AtomLite || _board == board_t::board_M5AtomMatrix || _board == board_t::board_M5AtomEcho || _board == board_t::board_M5AtomPsram)
+        if (_board == board_t::board_M5AtomLite || _board == board_t::board_M5AtomMatrix || _board == board_t::board_M5AtomVoice || _board == board_t::board_M5AtomPsram)
 #else
         if (false)
 #endif
@@ -386,7 +388,8 @@ namespace m5
 #if defined (CONFIG_IDF_TARGET_ESP32P4)
         if (_board == board_t::board_M5Tab5)
 #elif defined (CONFIG_IDF_TARGET_ESP32S3)
-        if (_board == board_t::board_M5StackCoreS3 || _board == board_t::board_M5StackCoreS3SE)
+        if (_board == board_t::board_M5StackCoreS3 || _board == board_t::board_M5StackCoreS3SE
+         || _board == board_t::board_M5StackChan)
 #elif !defined (CONFIG_IDF_TARGET) || defined (CONFIG_IDF_TARGET_ESP32)
         if (_board == board_t::board_M5Stack || _board == board_t::board_M5StackCore2 || _board == board_t::board_M5Tough)
 #else
@@ -401,8 +404,8 @@ namespace m5
       }
 #endif
 
-      // Speaker selection is performed after the Module Display has been determined.
-      _begin_spk(cfg);
+      // Audio selection is performed after the Module Display has been determined.
+      _begin_audio(cfg);
 
       update();
 
@@ -579,7 +582,7 @@ namespace m5
               || (!port_a_used && ( // ATOM does not allow video output via UnitRCA when PortA is used.
                    board == board_t::board_M5AtomLite
                 || board == board_t::board_M5AtomMatrix
-                || board == board_t::board_M5AtomEcho
+                || board == board_t::board_M5AtomVoice
                 || board == board_t::board_M5AtomPsram
                 || board == board_t::board_M5AtomU
               )))
@@ -625,29 +628,34 @@ namespace m5
     bool _use_pmic_button = false;
 
     void _begin(const config_t& cfg);
-    void _begin_spk(config_t& cfg);
+    void _begin_audio(config_t& cfg);
     bool _begin_rtc_imu(const config_t& cfg);
 
     board_t _check_boardtype(board_t);
     void _setup_i2c(board_t);
     void _setup_led(board_t);
+    bool _detect_i2c_device(uint8_t sda, uint8_t scl, uint8_t addr, const uint8_t* cmd_list=nullptr);
 
     static void _setup_pinmap(board_t);
     static bool _speaker_enabled_cb_core2(void* args, bool enabled);
     static bool _speaker_enabled_cb_cores3(void* args, bool enabled);
     static bool _speaker_enabled_cb_sticks3(void* args, bool enabled);
-    static bool _speaker_enabled_cb_hat_spk(void* args, bool enabled);
-    static bool _speaker_enabled_cb_atomic_echo(void* args, bool enabled);
+    static bool _speaker_enabled_cb_papercolor(void* args, bool enabled);
+    static bool _speaker_enabled_cb_stopwatch(void* args, bool enabled);
     static bool _speaker_enabled_cb_tab5(void* args, bool enabled);
     static bool _speaker_enabled_cb_cardputer_adv(void* args, bool enabled);
-    static bool _microphone_enabled_cb_stickc(void* args, bool enabled);
-    static bool _microphone_enabled_cb_cores3(void* args, bool enabled);
-    static bool _microphone_enabled_cb_sticks3(void* args, bool enabled);
-    static bool _microphone_enabled_cb_atomic_echo(void* args, bool enabled);
-    static bool _microphone_enabled_cb_atom_echos3r(void* args, bool enabled);
     static bool _speaker_enabled_cb_atom_echos3r(void* args, bool enabled);
+    static bool _speaker_enabled_cb_atomic_echo(void* args, bool enabled);
+    static bool _speaker_enabled_cb_hat_spk(void* args, bool enabled);
+    static bool _microphone_enabled_cb_cores3(void* args, bool enabled);
+    static bool _microphone_enabled_cb_stickc(void* args, bool enabled);
+    static bool _microphone_enabled_cb_sticks3(void* args, bool enabled);
+    static bool _microphone_enabled_cb_papercolor(void* args, bool enabled);
+    static bool _microphone_enabled_cb_stopwatch(void* args, bool enabled);
     static bool _microphone_enabled_cb_tab5(void* args, bool enabled);
     static bool _microphone_enabled_cb_cardputer_adv(void* args, bool enabled);
+    static bool _microphone_enabled_cb_atomic_echo(void* args, bool enabled);
+    static bool _microphone_enabled_cb_atom_echos3r(void* args, bool enabled);
 
     static int8_t _get_pin_table[pin_name_max];
   };

@@ -17,24 +17,99 @@ This project uses Python 3 and creates its own virtual environment at `.venv`.
 
 ```bash
 cd stack-chan-server
-export ALIYUN_NLS_TOKEN='your-token'
-export ALIYUN_NLS_APPKEY='your-appkey'
+cat > .env <<'EOF'
+ALIYUN_AK_ID='your-access-key-id'
+ALIYUN_AK_SECRET='your-access-key-secret'
+ALIYUN_NLS_APPKEY='your-appkey'
+EOF
 ./start.sh
 ```
 
-The first start installs dependencies from `requirements.txt`. Building `dlib` for `face_recognition` can take a few minutes.
+The server can also use `ALIYUN_NLS_TOKEN` directly. With `ALIYUN_AK_ID` and `ALIYUN_AK_SECRET`, it creates and refreshes the NLS token automatically. The default ASR/TTS/command server uses only Python standard library modules.
+
+Face detection visualization is optional because `face_recognition_models` is large. Install it only when needed:
+
+```bash
+cd stack-chan-server
+.venv/bin/python -m pip install -r requirements-face.txt
+```
+
+`start.sh` uses Tsinghua PyPI by default and clears proxy variables for pip installs. Override with `STACKCHAN_PIP_INDEX_URL` and `STACKCHAN_PIP_TRUSTED_HOST` if needed.
 
 Captured images are saved under `captures/` relative to this directory.
 
 ## Endpoints
 
+See [HTTP_COMMAND_API.md](HTTP_COMMAND_API.md) for the full command API reference and browser-friendly GET examples.
+
 `GET /health`
 
 Returns service status and endpoint metadata.
 
+`GET /devices`
+
+Lists devices that have checked in through the HTTP command channel:
+
+```bash
+curl 'http://127.0.0.1:8091/devices'
+```
+
+`GET /device/next-command?device_id=...&timeout=25`
+
+Device long-poll endpoint. Stack-chan keeps one blocking HTTP request open and receives a JSON command when the server has one queued. A timeout returns `{"type":"noop"}`.
+
+`GET /device/ack?device_id=...&cmd_id=...&status=received|done|failed`
+
+Device ACK endpoint.
+
+`GET /command/<type>?device_id=...`
+
+Queues a command for a device. These GET shortcuts are intended for manual testing from a browser or curl:
+
+```bash
+curl -G 'http://127.0.0.1:8091/command/face' \
+  --data-urlencode 'device_id=stackchan-001' \
+  --data-urlencode 'expression=happy'
+
+curl -G 'http://127.0.0.1:8091/command/speak' \
+  --data-urlencode 'device_id=stackchan-001' \
+  --data-urlencode 'text=早上好，我已经收到你的问题啦。'
+
+curl -G 'http://127.0.0.1:8091/command/motion' \
+  --data-urlencode 'device_id=stackchan-001' \
+  --data-urlencode 'pan=15' \
+  --data-urlencode 'tilt=45' \
+  --data-urlencode 'duration_ms=500'
+
+curl -G 'http://127.0.0.1:8091/command/sequence' \
+  --data-urlencode 'device_id=stackchan-001' \
+  --data-urlencode 'expression=thinking' \
+  --data-urlencode 'text=让我想一下这个问题。'
+```
+
+`POST /command`
+
+Queues the full command schema as JSON:
+
+```json
+{
+  "device_id": "stackchan-001",
+  "type": "sequence",
+  "payload": [
+    {"type": "face", "expression": "thinking"},
+    {"type": "motion", "pan": 15, "tilt": 45, "duration_ms": 400},
+    {"type": "speak", "text": "让我想一下这个问题。"}
+  ]
+}
+```
+
 `POST /upload`
 
 Audio upload endpoint for speech recognition. The body can be WAV or raw PCM. WAV sample rate is detected from the header; raw PCM defaults to `STACKCHAN_ALIYUN_SAMPLE_RATE` or `16000`.
+
+`POST /upload-audio`
+
+Alias for `/upload`. The firmware uses this route in background listening mode.
 
 Response:
 
@@ -78,7 +153,10 @@ Environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ALIYUN_NLS_TOKEN` | required | Aliyun NLS access token |
+| `ALIYUN_AK_ID` | optional | Aliyun AccessKey ID, used to create and refresh NLS token |
+| `ALIYUN_AK_SECRET` | optional | Aliyun AccessKey Secret, used to create and refresh NLS token |
+| `ALIYUN_NLS_TOKEN` | optional | Aliyun NLS access token, required only when AccessKey is not configured |
+| `ALIYUN_NLS_TOKEN_EXPIRE_TIME` | `0` | Optional token expire timestamp in seconds |
 | `ALIYUN_NLS_APPKEY` | required | Aliyun NLS app key |
 | `STACKCHAN_SERVER_HOST` | `0.0.0.0` | Bind host |
 | `STACKCHAN_SERVER_PORT` | `8091` | Bind port |

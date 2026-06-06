@@ -2,8 +2,9 @@
 set -euo pipefail
 
 PORT="${1:-/dev/ttyACM0}"
+MODE="${2:-}"
 
-. /home/myendless/code/stack-chan/esp-idf/export.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
 idf.py set-target esp32s3
 idf.py build
@@ -15,11 +16,12 @@ idf.py build
     -p "$PORT" \
     -b 460800 \
     --before default_reset \
-    --after no_reset \
+    --after hard_reset \
     write_flash "@flash_args"
 )
 
-printf '\nFlash complete. Press the board RESET button, then press Enter to start monitor.\n'
-read -r
+printf '\nBuild and flash complete. Board reset automatically.\n'
 
-idf.py -p "$PORT" monitor
+if [ "$MODE" = "monitor" ]; then
+  idf.py -p "$PORT" monitor
+fi

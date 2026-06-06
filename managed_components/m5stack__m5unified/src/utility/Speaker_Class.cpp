@@ -25,7 +25,7 @@
 #include <sdkconfig.h>
 #include <esp_log.h>
 
-#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
  #if __has_include(<driver/i2s_std.h>)
   #if __has_include(<hal/i2s_ll.h>)
    #include <hal/i2s_ll.h>
@@ -203,7 +203,7 @@ namespace m5
 
     i2s_std_config_t i2s_config;
     memset(&i2s_config, 0, sizeof(i2s_std_config_t));
-#if defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32H2 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
     i2s_config.clk_cfg.clk_src = i2s_clock_src_t::I2S_CLK_SRC_DEFAULT;
 #else
     i2s_config.clk_cfg.clk_src = i2s_clock_src_t::I2S_CLK_SRC_PLL_160M;
@@ -410,7 +410,7 @@ namespace m5
 #endif
 #endif
 
-#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined (CONFIG_IDF_TARGET_ESP32C6) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32C3 ) || defined (CONFIG_IDF_TARGET_ESP32C6) || defined ( CONFIG_IDF_TARGET_ESP32H2 ) || defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
     // モノラル設定時、同じデータを左右両方に送信する設定
     if (!self->_cfg.stereo && !self->_cfg.use_dac && !self->_cfg.buzzer)
     {
@@ -418,7 +418,7 @@ namespace m5
       dev->tx_conf.tx_chan_equal = 1;
     }
 
-#if defined ( CONFIG_IDF_TARGET_ESP32P4 )
+#if defined ( CONFIG_IDF_TARGET_ESP32H2 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 )
     dev->tx_conf.tx_bck_div_num = div_m - 1;
 #else
     dev->tx_conf1.tx_bck_div_num = div_m - 1;
