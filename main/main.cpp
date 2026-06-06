@@ -46,6 +46,12 @@ static bool wifi_is_connected();
 
 extern const uint8_t happy_face_png_start[] asm("_binary_happy_face_png_start");
 extern const uint8_t happy_face_png_end[] asm("_binary_happy_face_png_end");
+extern const uint8_t calm_face_png_start[] asm("_binary_calm_face_png_start");
+extern const uint8_t calm_face_png_end[] asm("_binary_calm_face_png_end");
+extern const uint8_t speak1_face_png_start[] asm("_binary_speak1_face_png_start");
+extern const uint8_t speak1_face_png_end[] asm("_binary_speak1_face_png_end");
+extern const uint8_t speak2_face_png_start[] asm("_binary_speak2_face_png_start");
+extern const uint8_t speak2_face_png_end[] asm("_binary_speak2_face_png_end");
 
 namespace {
 
@@ -127,6 +133,7 @@ TaskHandle_t camera_upload_task_handle = nullptr;
 TaskHandle_t tracking_task_handle = nullptr;
 TaskHandle_t command_task_handle = nullptr;
 TaskHandle_t boot_task_handle = nullptr;
+TaskHandle_t speak_animation_task_handle = nullptr;
 EventGroupHandle_t wifi_event_group = nullptr;
 SemaphoreHandle_t m5_mutex = nullptr;
 int wifi_retry_count = 0;
@@ -137,6 +144,7 @@ volatile bool app2_stop_requested = false;
 volatile bool tracking_stop_requested = false;
 volatile bool voice_listener_paused = false;
 volatile bool voice_status_screen_suppressed = false;
+volatile bool speak_animation_running = false;
 bool camera_initialized = false;
 volatile bool camera_owns_internal_i2c = false;
 bool servo_uart_initialized = false;
@@ -171,9 +179,12 @@ struct ExpressionAsset {
     int height;
 };
 
-static constexpr const char* kDefaultExpression = "happy";
+static constexpr const char* kDefaultExpression = "calm";
 static const ExpressionAsset kExpressionAssets[] = {
+    {"calm", calm_face_png_start, calm_face_png_end, 320, 240},
     {"happy", happy_face_png_start, happy_face_png_end, 320, 240},
+    {"speak1", speak1_face_png_start, speak1_face_png_end, 320, 240},
+    {"speak2", speak2_face_png_start, speak2_face_png_end, 320, 240},
 };
 
 struct XiaozhiConfig {
@@ -3110,6 +3121,33 @@ static void show_expression(const char* expression)
     }
 }
 
+static void start_speaking_animation()
+{
+    speak_animation_running = true;
+    if (speak_animation_task_handle != nullptr) {
+        return;
+    }
+    xTaskCreatePinnedToCore([](void*) {
+        bool open = false;
+        while (speak_animation_running) {
+            show_expression(open ? "speak2" : "speak1");
+            open = !open;
+            vTaskDelay(pdMS_TO_TICKS(160));
+        }
+        speak_animation_task_handle = nullptr;
+        vTaskDelete(nullptr);
+    }, "speak_anim", 4 * 1024, nullptr, 2, &speak_animation_task_handle, 0);
+}
+
+static void stop_speaking_animation()
+{
+    speak_animation_running = false;
+    for (int i = 0; i < 30 && speak_animation_task_handle != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    show_expression(kDefaultExpression);
+}
+
 static bool execute_speak_command(const char* text)
 {
     if (text == nullptr || text[0] == '\0') {
@@ -3130,8 +3168,10 @@ static bool execute_speak_command(const char* text)
     }
     M5.Speaker.setVolume(CONFIG_STACKCHAN_TTS_VOLUME);
     app2_stop_requested = false;
+    start_speaking_animation();
     bool ok = stream_tts_pcm_for_text(text);
     M5.Speaker.end();
+    stop_speaking_animation();
     voice_listener_paused = false;
     return ok;
 }
