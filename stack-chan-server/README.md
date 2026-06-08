@@ -20,7 +20,7 @@ cd stack-chan-server
 cat > .env <<'EOF'
 ALIYUN_AK_ID='your-access-key-id'
 ALIYUN_AK_SECRET='your-access-key-secret'
-ALIYUN_NLS_APPKEY='your-appkey'
+ALIYUN_NLS_APPKEY='your-nls-appkey'
 EOF
 ./start.sh
 ```
@@ -70,6 +70,15 @@ Queues a command for a device. These GET shortcuts are intended for manual testi
 curl -G 'http://127.0.0.1:8091/command/face' \
   --data-urlencode 'device_id=stackchan-001' \
   --data-urlencode 'expression=happy'
+
+curl -G 'http://127.0.0.1:8091/expression/shy' \
+  --data-urlencode 'device_id=stackchan-001'
+
+curl -G 'http://127.0.0.1:8091/action/blink' \
+  --data-urlencode 'device_id=stackchan-001'
+
+curl -G 'http://127.0.0.1:8091/action/nod' \
+  --data-urlencode 'device_id=stackchan-001'
 
 curl -G 'http://127.0.0.1:8091/command/speak' \
   --data-urlencode 'device_id=stackchan-001' \
@@ -153,8 +162,8 @@ Environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ALIYUN_AK_ID` | optional | Aliyun AccessKey ID, used to create and refresh NLS token |
-| `ALIYUN_AK_SECRET` | optional | Aliyun AccessKey Secret, used to create and refresh NLS token |
+| `ALIYUN_AK_ID` | required unless token is set | Aliyun AccessKey ID, used to create and refresh NLS token |
+| `ALIYUN_AK_SECRET` | required unless token is set | Aliyun AccessKey Secret, used to create and refresh NLS token |
 | `ALIYUN_NLS_TOKEN` | optional | Aliyun NLS access token, required only when AccessKey is not configured |
 | `ALIYUN_NLS_TOKEN_EXPIRE_TIME` | `0` | Optional token expire timestamp in seconds |
 | `ALIYUN_NLS_APPKEY` | required | Aliyun NLS app key |

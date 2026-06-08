@@ -92,10 +92,71 @@ curl -G 'http://127.0.0.1:8091/command/face' \
 Common expression values are free-form strings for now, such as:
 
 ```text
+calm
 happy
+shy
 thinking
+happy_squint
+happy_squint_soft
 listening
 stopped
+```
+
+The firmware also supports animated expression actions through the same face command:
+
+```text
+blink
+nod
+nodding
+happy_dynamic
+happy_squint_dynamic
+```
+
+Shortcut routes are available for browser/manual testing:
+
+```http
+GET /expressions
+GET /expression/<name>?device_id=<id>
+GET /action/<name>?device_id=<id>
+```
+
+```bash
+curl -G 'http://127.0.0.1:8091/expression/shy' \
+  --data-urlencode 'device_id=44:1b:f6:e4:83:8c'
+
+curl -G 'http://127.0.0.1:8091/expression/thinking' \
+  --data-urlencode 'device_id=44:1b:f6:e4:83:8c'
+
+curl -G 'http://127.0.0.1:8091/action/blink' \
+  --data-urlencode 'device_id=44:1b:f6:e4:83:8c'
+
+curl -G 'http://127.0.0.1:8091/action/nod' \
+  --data-urlencode 'device_id=44:1b:f6:e4:83:8c'
+
+curl -G 'http://127.0.0.1:8091/action/happy_dynamic' \
+  --data-urlencode 'device_id=44:1b:f6:e4:83:8c'
+```
+
+The generic command endpoint also accepts expression/action aliases:
+
+```bash
+curl -G 'http://127.0.0.1:8091/command/expression' \
+  --data-urlencode 'device_id=44:1b:f6:e4:83:8c' \
+  --data-urlencode 'name=害羞'
+
+curl -G 'http://127.0.0.1:8091/command/action' \
+  --data-urlencode 'device_id=44:1b:f6:e4:83:8c' \
+  --data-urlencode 'action=点头'
+```
+
+Chinese aliases are accepted in query params and shortcut paths:
+
+```text
+害羞 -> shy
+思考 -> thinking
+眨眼 -> blink
+点头 -> nod
+开心 -> happy_dynamic
 ```
 
 ### Motion

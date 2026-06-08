@@ -38,6 +38,45 @@ TOKEN_REGION_ID = "cn-shanghai"
 TOKEN_API_VERSION = "2019-02-28"
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 
+AVAILABLE_EXPRESSIONS = (
+    "calm",
+    "happy",
+    "shy",
+    "thinking",
+    "speak1",
+    "speak2",
+    "blink_half",
+    "blink_closed",
+    "nod_soft",
+    "nod_down",
+    "happy_squint",
+    "happy_squint_soft",
+)
+
+AVAILABLE_ACTIONS = (
+    "blink",
+    "nod",
+    "nodding",
+    "happy_dynamic",
+    "happy_squint_dynamic",
+)
+
+EXPRESSION_ALIASES = {
+    "default": "calm",
+    "listening": "calm",
+    "stopped": "calm",
+    "think": "thinking",
+    "thinking": "thinking",
+    "shy": "shy",
+    "happy": "happy",
+    "calm": "calm",
+    "开心": "happy_dynamic",
+    "害羞": "shy",
+    "思考": "thinking",
+    "眨眼": "blink",
+    "点头": "nod",
+}
+
 
 def split_sentences(text: str, max_chars: int):
     text = re.sub(r"\s+", " ", text.strip())
@@ -116,8 +155,32 @@ class Handler(BaseHTTPRequestHandler):
                     "sample_rate": self.server.sample_rate,
                     "channels": 1,
                     "voice": self.server.voice,
+                    "expressions": list(AVAILABLE_EXPRESSIONS),
+                    "actions": list(AVAILABLE_ACTIONS),
                 }
             )
+            return
+        if path == "/expressions":
+            self._send_json(
+                {
+                    "type": "expressions",
+                    "expressions": list(AVAILABLE_EXPRESSIONS),
+                    "actions": list(AVAILABLE_ACTIONS),
+                    "aliases": EXPRESSION_ALIASES,
+                    "examples": {
+                        "expression": "/expression/shy?device_id=...",
+                        "action": "/action/blink?device_id=...",
+                    },
+                }
+            )
+            return
+        if path.startswith("/expression/"):
+            expression = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            self._handle_face_shortcut(query, expression)
+            return
+        if path.startswith("/action/"):
+            action = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            self._handle_face_shortcut(query, action, action_only=True)
             return
         if path == "/devices":
             self._handle_devices()
@@ -245,10 +308,59 @@ class Handler(BaseHTTPRequestHandler):
         else:
             payload = command_payload_from_query(command_type, query)
 
-        command_wire_type = "motion" if command_type == "move" else command_type
+        if command_type in ("expression", "action"):
+            command_wire_type = "face"
+        else:
+            command_wire_type = "motion" if command_type == "move" else command_type
+        if command_wire_type == "face" and isinstance(payload, dict):
+            payload["expression"] = normalize_expression_name(payload.get("expression") or payload.get("face") or "happy")
+        elif command_wire_type == "sequence" and isinstance(payload, list):
+            for step in payload:
+                if isinstance(step, dict) and step.get("type") == "face":
+                    step["expression"] = normalize_expression_name(step.get("expression") or step.get("face") or "happy")
         command = make_command(command_wire_type, payload, priority=priority, interrupt=interrupt)
         self._enqueue_command(device_id, command)
         self._send_json({"type": "queued", "device_id": device_id, "command": command})
+
+    def _handle_face_shortcut(self, query: dict, expression: str, action_only: bool = False):
+        expression = normalize_expression_name(expression)
+        if action_only and expression not in AVAILABLE_ACTIONS:
+            self._send_json(
+                {
+                    "type": "error",
+                    "message": f"unknown action: {expression}",
+                    "actions": list(AVAILABLE_ACTIONS),
+                },
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if expression not in AVAILABLE_EXPRESSIONS and expression not in AVAILABLE_ACTIONS:
+            self._send_json(
+                {
+                    "type": "error",
+                    "message": f"unknown expression or action: {expression}",
+                    "expressions": list(AVAILABLE_EXPRESSIONS),
+                    "actions": list(AVAILABLE_ACTIONS),
+                },
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        requested_device_id = first_value(query, "device_id")
+        device_id = self._resolve_command_device_id(requested_device_id)
+        priority = int(first_value(query, "priority") or 0)
+        interrupt = parse_bool(first_value(query, "interrupt") or "false")
+        command = make_command("face", {"expression": expression}, priority=priority, interrupt=interrupt)
+        self._enqueue_command(device_id, command)
+        self._send_json(
+            {
+                "type": "queued",
+                "device_id": device_id,
+                "expression": expression,
+                "kind": "action" if expression in AVAILABLE_ACTIONS else "expression",
+                "command": command,
+            }
+        )
 
     def _handle_next_command(self, query: dict):
         device_id = self._device_id(query)
@@ -298,7 +410,10 @@ class Handler(BaseHTTPRequestHandler):
         device_id = safe_device_id(device_id)
         self.server.last_seen.setdefault(device_id, time.time())
         self._queue_for(device_id).put(command)
-        print(f"Command queued: device={device_id} cmd_id={command['cmd_id']} type={command['type']}", flush=True)
+        detail = ""
+        if command.get("type") == "face" and isinstance(command.get("payload"), dict):
+            detail = f" expression={command['payload'].get('expression', '')}"
+        print(f"Command queued: device={device_id} cmd_id={command['cmd_id']} type={command['type']}{detail}", flush=True)
 
     def _handle_upload_image(self, body: bytes):
         if not body:
@@ -416,7 +531,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Audio-Format", "pcm_s16le")
         self.send_header("X-Sample-Rate", str(self.server.sample_rate))
         self.send_header("X-Channels", "1")
+        if len(parts) == 1:
+            self.send_header("Content-Length", str(len(first_audio)))
+        self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True
 
         try:
             print(f"TTS audio bytes: {len(first_audio)} for {parts[0]!r}", flush=True)
@@ -599,6 +718,13 @@ def is_placeholder_device_id(device_id: str) -> bool:
     return value in ("", "DEFAULT", "AA:BB:CC:DD:EE:FF", "AABBCCDDEEFF")
 
 
+def normalize_expression_name(expression: str) -> str:
+    value = str(expression or "").strip()
+    if not value:
+        return "happy"
+    return EXPRESSION_ALIASES.get(value, value)
+
+
 def latest_seen_device_id(last_seen: dict[str, float]) -> str:
     if not last_seen:
         return "default"
@@ -617,8 +743,11 @@ def make_command(command_type: str, payload, priority: int = 0, interrupt: bool 
 
 
 def command_payload_from_query(command_type: str, query: dict):
-    if command_type == "face":
-        return {"expression": first_value(query, "expression") or first_value(query, "face") or "happy"}
+    if command_type in ("face", "expression", "action"):
+        expression = first_value(query, "expression") or first_value(query, "face") or "happy"
+        if command_type in ("expression", "action"):
+            expression = first_value(query, "name") or first_value(query, "action") or expression
+        return {"expression": normalize_expression_name(expression)}
     if command_type == "speak":
         return {"text": first_value(query, "text") or "你好呀"}
     if command_type == "play_audio":
@@ -648,7 +777,7 @@ def command_payload_from_query(command_type: str, query: dict):
             except json.JSONDecodeError:
                 pass
         text = first_value(query, "text")
-        expression = first_value(query, "expression") or "happy"
+        expression = normalize_expression_name(first_value(query, "expression") or "happy")
         steps = [{"type": "face", "expression": expression}]
         if text:
             steps.append({"type": "speak", "text": text})

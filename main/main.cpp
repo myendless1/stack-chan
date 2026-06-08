@@ -52,6 +52,22 @@ extern const uint8_t speak1_face_png_start[] asm("_binary_speak1_face_png_start"
 extern const uint8_t speak1_face_png_end[] asm("_binary_speak1_face_png_end");
 extern const uint8_t speak2_face_png_start[] asm("_binary_speak2_face_png_start");
 extern const uint8_t speak2_face_png_end[] asm("_binary_speak2_face_png_end");
+extern const uint8_t shy_face_png_start[] asm("_binary_shy_face_png_start");
+extern const uint8_t shy_face_png_end[] asm("_binary_shy_face_png_end");
+extern const uint8_t thinking_face_png_start[] asm("_binary_thinking_face_png_start");
+extern const uint8_t thinking_face_png_end[] asm("_binary_thinking_face_png_end");
+extern const uint8_t blink_half_face_png_start[] asm("_binary_blink_half_face_png_start");
+extern const uint8_t blink_half_face_png_end[] asm("_binary_blink_half_face_png_end");
+extern const uint8_t blink_closed_face_png_start[] asm("_binary_blink_closed_face_png_start");
+extern const uint8_t blink_closed_face_png_end[] asm("_binary_blink_closed_face_png_end");
+extern const uint8_t nod_soft_face_png_start[] asm("_binary_nod_soft_face_png_start");
+extern const uint8_t nod_soft_face_png_end[] asm("_binary_nod_soft_face_png_end");
+extern const uint8_t nod_down_face_png_start[] asm("_binary_nod_down_face_png_start");
+extern const uint8_t nod_down_face_png_end[] asm("_binary_nod_down_face_png_end");
+extern const uint8_t happy_squint_face_png_start[] asm("_binary_happy_squint_face_png_start");
+extern const uint8_t happy_squint_face_png_end[] asm("_binary_happy_squint_face_png_end");
+extern const uint8_t happy_squint_soft_face_png_start[] asm("_binary_happy_squint_soft_face_png_start");
+extern const uint8_t happy_squint_soft_face_png_end[] asm("_binary_happy_squint_soft_face_png_end");
 
 namespace {
 
@@ -134,6 +150,7 @@ TaskHandle_t tracking_task_handle = nullptr;
 TaskHandle_t command_task_handle = nullptr;
 TaskHandle_t boot_task_handle = nullptr;
 TaskHandle_t speak_animation_task_handle = nullptr;
+TaskHandle_t expression_animation_task_handle = nullptr;
 EventGroupHandle_t wifi_event_group = nullptr;
 SemaphoreHandle_t m5_mutex = nullptr;
 int wifi_retry_count = 0;
@@ -145,6 +162,7 @@ volatile bool tracking_stop_requested = false;
 volatile bool voice_listener_paused = false;
 volatile bool voice_status_screen_suppressed = false;
 volatile bool speak_animation_running = false;
+volatile bool expression_animation_running = false;
 bool camera_initialized = false;
 volatile bool camera_owns_internal_i2c = false;
 bool servo_uart_initialized = false;
@@ -154,6 +172,7 @@ char client_id[37] = {};
 std::string active_wifi_ssid = CONFIG_STACKCHAN_WIFI_SSID;
 std::string active_server_base = "http://192.168.21.15:8091";
 bool active_server_selected = false;
+int active_wifi_candidate_index = -1;
 
 struct WifiCandidate {
     const char* ssid;
@@ -162,8 +181,10 @@ struct WifiCandidate {
 
 static constexpr WifiCandidate kWifiCandidates[] = {
     {CONFIG_STACKCHAN_WIFI_SSID, CONFIG_STACKCHAN_WIFI_PASSWORD},
+    {"MYENDLESS", "88888888"},
     {"myendless", "88888888"},
 };
+static constexpr int kWifiCandidateCount = sizeof(kWifiCandidates) / sizeof(kWifiCandidates[0]);
 
 static constexpr const char* kServerBaseCandidates[] = {
     "http://192.168.21.15:8091",
@@ -179,13 +200,60 @@ struct ExpressionAsset {
     int height;
 };
 
+struct ExpressionAnimation {
+    const char* name;
+    const char* const* frames;
+    size_t frame_count;
+    int frame_ms;
+};
+
 static constexpr const char* kDefaultExpression = "calm";
 static const ExpressionAsset kExpressionAssets[] = {
     {"calm", calm_face_png_start, calm_face_png_end, 320, 240},
     {"happy", happy_face_png_start, happy_face_png_end, 320, 240},
     {"speak1", speak1_face_png_start, speak1_face_png_end, 320, 240},
     {"speak2", speak2_face_png_start, speak2_face_png_end, 320, 240},
+    {"shy", shy_face_png_start, shy_face_png_end, 320, 240},
+    {"thinking", thinking_face_png_start, thinking_face_png_end, 320, 240},
+    {"blink_half", blink_half_face_png_start, blink_half_face_png_end, 320, 240},
+    {"blink_closed", blink_closed_face_png_start, blink_closed_face_png_end, 320, 240},
+    {"nod_soft", nod_soft_face_png_start, nod_soft_face_png_end, 320, 240},
+    {"nod_down", nod_down_face_png_start, nod_down_face_png_end, 320, 240},
+    {"happy_squint", happy_squint_face_png_start, happy_squint_face_png_end, 320, 240},
+    {"happy_squint_soft", happy_squint_soft_face_png_start, happy_squint_soft_face_png_end, 320, 240},
 };
+static constexpr const char* kBlinkFrames[] = {
+    "calm",
+    "blink_half",
+    "blink_closed",
+    "blink_half",
+    "calm",
+    "calm",
+    "calm",
+};
+static constexpr const char* kNodFrames[] = {
+    "calm",
+    "nod_soft",
+    "nod_down",
+    "nod_soft",
+    "calm",
+};
+static constexpr const char* kHappyDynamicFrames[] = {
+    "happy_squint_soft",
+    "happy_squint",
+    "happy_squint_soft",
+    "happy_squint",
+};
+static constexpr ExpressionAnimation kExpressionAnimations[] = {
+    {"blink", kBlinkFrames, sizeof(kBlinkFrames) / sizeof(kBlinkFrames[0]), 140},
+    {"nod", kNodFrames, sizeof(kNodFrames) / sizeof(kNodFrames[0]), 180},
+    {"nodding", kNodFrames, sizeof(kNodFrames) / sizeof(kNodFrames[0]), 180},
+    {"happy_dynamic", kHappyDynamicFrames, sizeof(kHappyDynamicFrames) / sizeof(kHappyDynamicFrames[0]), 180},
+    {"happy_squint_dynamic", kHappyDynamicFrames, sizeof(kHappyDynamicFrames) / sizeof(kHappyDynamicFrames[0]), 180},
+};
+bool expression_screen_visible = false;
+const ExpressionAsset* current_expression_asset = nullptr;
+const ExpressionAnimation* current_expression_animation = nullptr;
 
 struct XiaozhiConfig {
     std::string websocket_url;
@@ -230,8 +298,15 @@ private:
     bool locked_ = false;
 };
 
+void mark_expression_screen_dirty()
+{
+    expression_screen_visible = false;
+    current_expression_asset = nullptr;
+}
+
 void draw_header(const char* title)
 {
+    mark_expression_screen_dirty();
     auto& display = M5.Display;
     display.fillScreen(TFT_BLACK);
     display.setTextDatum(top_left);
@@ -248,6 +323,7 @@ void draw_header(const char* title)
 
 void draw_launcher()
 {
+    mark_expression_screen_dirty();
     auto& display = M5.Display;
     display.fillScreen(TFT_BLACK);
     display.setTextDatum(top_left);
@@ -1084,13 +1160,13 @@ static bool wifi_is_connected()
     return false;
 }
 
-static bool ensure_wifi_connected(bool allow_connect)
+static bool ensure_wifi_connected(bool allow_connect, bool force_candidate_scan = false, int start_candidate_index = 0)
 {
     if (wifi_event_group == nullptr) {
         wifi_event_group = xEventGroupCreate();
     }
 
-    if (wifi_is_connected()) {
+    if (!force_candidate_scan && wifi_is_connected()) {
         set_current_network_status("WiFi OK", "Already connected", active_wifi_ssid.c_str(), "", false, true);
         return true;
     }
@@ -1126,7 +1202,9 @@ static bool ensure_wifi_connected(bool allow_connect)
         ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     }
 
-    for (const WifiCandidate& candidate : kWifiCandidates) {
+    for (int offset = 0; offset < kWifiCandidateCount; ++offset) {
+        const int candidate_index = (start_candidate_index + offset + kWifiCandidateCount) % kWifiCandidateCount;
+        const WifiCandidate& candidate = kWifiCandidates[candidate_index];
         if (candidate.ssid == nullptr || strlen(candidate.ssid) == 0) {
             continue;
         }
@@ -1154,6 +1232,7 @@ static bool ensure_wifi_connected(bool allow_connect)
                                                pdMS_TO_TICKS(16000));
         if (bits & kWifiConnectedBit) {
             active_wifi_ssid = candidate.ssid;
+            active_wifi_candidate_index = candidate_index;
             active_server_selected = false;
             set_current_network_status("WiFi OK", "Connected", active_wifi_ssid.c_str());
             return true;
@@ -1163,6 +1242,7 @@ static bool ensure_wifi_connected(bool allow_connect)
 
     set_current_network_status("WiFi Fail", "Could not connect", "Check SSID/password", "", false, false);
     ESP_LOGE(TAG, "WiFi connection failed or timed out");
+    active_wifi_candidate_index = -1;
     return false;
 }
 
@@ -1236,10 +1316,31 @@ static bool ensure_server_selected()
 
 static bool ensure_network_ready()
 {
-    if (!ensure_wifi_connected(true)) {
-        return false;
+    bool use_existing_connection = wifi_is_connected();
+    int next_candidate_index = 0;
+
+    for (int attempt = 0; attempt < kWifiCandidateCount; ++attempt) {
+        if (use_existing_connection) {
+            if (ensure_server_selected()) {
+                return true;
+            }
+            ESP_LOGW(TAG, "Connected WiFi '%s' but no server candidate is healthy; trying next WiFi candidate",
+                     active_wifi_ssid.c_str());
+            next_candidate_index = active_wifi_candidate_index >= 0 ? active_wifi_candidate_index + 1 : 0;
+            use_existing_connection = false;
+        } else if (!ensure_wifi_connected(true, true, next_candidate_index)) {
+            return false;
+        }
+
+        if (ensure_server_selected()) {
+            return true;
+        }
+        ESP_LOGW(TAG, "Connected WiFi '%s' but no server candidate is healthy; trying next WiFi candidate",
+                 active_wifi_ssid.c_str());
+        next_candidate_index = active_wifi_candidate_index >= 0 ? active_wifi_candidate_index + 1 : 0;
     }
-    return ensure_server_selected();
+
+    return false;
 }
 
 static std::string make_system_info_json()
@@ -3103,22 +3204,90 @@ static const ExpressionAsset* find_expression_asset(const char* expression)
     return nullptr;
 }
 
-static void show_expression(const char* expression)
+static const ExpressionAnimation* find_expression_animation(const char* expression)
+{
+    const char* name = expression != nullptr && expression[0] != '\0' ? expression : "";
+    for (const auto& animation : kExpressionAnimations) {
+        if (strcmp(animation.name, name) == 0) {
+            return &animation;
+        }
+    }
+    return nullptr;
+}
+
+static void render_expression_frame(const char* expression)
 {
     {
         M5Lock lock;
         auto& display = M5.Display;
         const ExpressionAsset* asset = find_expression_asset(expression);
         if (asset != nullptr) {
-            display.fillScreen(TFT_BLACK);
             const uint32_t image_len = static_cast<uint32_t>(asset->end - asset->start);
-            if (display.drawPng(asset->start, image_len,
-                                (display.width() - asset->width) / 2, (display.height() - asset->height) / 2)) {
+            const int draw_x = (display.width() - asset->width) / 2;
+            const int draw_y = (display.height() - asset->height) / 2;
+            if (!expression_screen_visible || current_expression_asset == nullptr ||
+                current_expression_asset->width != asset->width || current_expression_asset->height != asset->height) {
+                if (display.drawPng(asset->start, image_len, draw_x, draw_y)) {
+                    expression_screen_visible = true;
+                    current_expression_asset = asset;
+                    return;
+                }
+            } else if (current_expression_asset != asset) {
+                if (display.drawPng(asset->start, image_len, draw_x, draw_y)) {
+                    current_expression_asset = asset;
+                    return;
+                }
+            } else {
                 return;
             }
         }
         display.fillScreen(TFT_BLACK);
+        mark_expression_screen_dirty();
     }
+}
+
+static void stop_expression_animation()
+{
+    expression_animation_running = false;
+    for (int i = 0; i < 30 && expression_animation_task_handle != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    current_expression_animation = nullptr;
+}
+
+static void start_expression_animation(const ExpressionAnimation* animation)
+{
+    if (animation == nullptr || animation->frame_count == 0) {
+        return;
+    }
+    if (expression_animation_task_handle != nullptr && current_expression_animation == animation) {
+        return;
+    }
+    stop_expression_animation();
+    expression_animation_running = true;
+    current_expression_animation = animation;
+    xTaskCreatePinnedToCore([](void* arg) {
+        const auto* animation = static_cast<const ExpressionAnimation*>(arg);
+        size_t frame = 0;
+        while (expression_animation_running && animation != nullptr && animation->frame_count > 0) {
+            render_expression_frame(animation->frames[frame]);
+            frame = (frame + 1) % animation->frame_count;
+            vTaskDelay(pdMS_TO_TICKS(animation->frame_ms));
+        }
+        expression_animation_task_handle = nullptr;
+        vTaskDelete(nullptr);
+    }, "expr_anim", 4 * 1024, const_cast<ExpressionAnimation*>(animation), 2, &expression_animation_task_handle, 0);
+}
+
+static void show_expression(const char* expression)
+{
+    const ExpressionAnimation* animation = find_expression_animation(expression);
+    if (animation != nullptr) {
+        start_expression_animation(animation);
+        return;
+    }
+    stop_expression_animation();
+    render_expression_frame(expression);
 }
 
 static void start_speaking_animation()

@@ -16,6 +16,10 @@ if [ -f .env ]; then
   set +a
 fi
 
+ALIYUN_AK_ID="${ALIYUN_AK_ID:-}"
+ALIYUN_AK_SECRET="${ALIYUN_AK_SECRET:-}"
+ALIYUN_NLS_APPKEY="${ALIYUN_NLS_APPKEY:-}"
+
 if [ ! -x "$VENV/bin/python" ]; then
   python3 -m venv "$VENV"
 fi
