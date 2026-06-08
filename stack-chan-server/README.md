@@ -116,6 +116,8 @@ Queues the full command schema as JSON:
 
 Audio upload endpoint for speech recognition. The body can be WAV or raw PCM. WAV sample rate is detected from the header; raw PCM defaults to `STACKCHAN_ALIYUN_SAMPLE_RATE` or `16000`.
 
+After recognition, motion phrases such as `左转15度`, `向右转二十度`, `抬头10度`, and `低头五度` are queued as Stack-chan motion commands instead of being spoken back. Other recognized text is still repeated as TTS.
+
 `POST /upload-audio`
 
 Alias for `/upload`. The firmware uses this route in background listening mode.
@@ -123,7 +125,7 @@ Alias for `/upload`. The firmware uses this route in background listening mode.
 Response:
 
 ```json
-{"type": "stt", "text": "...", "task_id": "..."}
+{"type": "stt", "text": "...", "task_id": "...", "handled_as": "motion|repeat"}
 ```
 
 `GET /stream-speak?text=...`

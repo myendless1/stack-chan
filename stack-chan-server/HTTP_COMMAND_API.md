@@ -362,11 +362,13 @@ Response:
   "text": "用户说的话",
   "task_id": "aliyun-task-id",
   "device_id": "44:1b:f6:e4:83:8c",
+  "handled_as": "motion",
+  "motion": {"type": "left", "degree": 15, "duration_ms": 500},
   "queued_command": "cmd_abc123"
 }
 ```
 
-When ASR text is not empty, the server currently queues a demo `sequence` command back to the same device.
+When ASR text contains a motion phrase such as `左转15度`, `向右转二十度`, `抬头10度`, or `低头五度`, the server queues a `motion` command back to the same device and does not queue TTS repeat speech. Other non-empty ASR text still queues the demo repeat `sequence`.
 
 ## TTS Stream
 

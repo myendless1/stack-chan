@@ -77,6 +77,54 @@ EXPRESSION_ALIASES = {
     "点头": "nod",
 }
 
+MOTION_DIRECTION_ALIASES = {
+    "左": "left",
+    "左边": "left",
+    "左转": "left",
+    "向左": "left",
+    "往左": "left",
+    "朝左": "left",
+    "转左": "left",
+    "右": "right",
+    "右边": "right",
+    "右转": "right",
+    "向右": "right",
+    "往右": "right",
+    "朝右": "right",
+    "转右": "right",
+    "上": "up",
+    "上面": "up",
+    "向上": "up",
+    "往上": "up",
+    "朝上": "up",
+    "抬头": "up",
+    "下": "down",
+    "下面": "down",
+    "向下": "down",
+    "往下": "down",
+    "朝下": "down",
+    "低头": "down",
+    "left": "left",
+    "right": "right",
+    "up": "up",
+    "down": "down",
+}
+
+CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
 
 def split_sentences(text: str, max_chars: int):
     text = re.sub(r"\s+", " ", text.strip())
@@ -102,6 +150,80 @@ def detect_wav_sample_rate(data: bytes) -> int | None:
     if len(data) < 28 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
         return None
     return struct.unpack_from("<I", data, 24)[0]
+
+
+def parse_chinese_integer(text: str) -> int | None:
+    text = text.strip()
+    if not text:
+        return None
+    if all(ch in CHINESE_DIGITS for ch in text):
+        value = 0
+        for ch in text:
+            value = value * 10 + CHINESE_DIGITS[ch]
+        return value
+
+    total = 0
+    current = 0
+    for ch in text:
+        if ch in CHINESE_DIGITS:
+            current = CHINESE_DIGITS[ch]
+        elif ch == "十":
+            total += (current or 1) * 10
+            current = 0
+        elif ch == "百":
+            total += (current or 1) * 100
+            current = 0
+        else:
+            return None
+    return total + current
+
+
+def parse_spoken_number(text: str) -> float | None:
+    text = text.strip().translate(str.maketrans("０１２３４５６７８９．", "0123456789."))
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return float(text)
+    value = parse_chinese_integer(text)
+    return float(value) if value is not None else None
+
+
+def parse_voice_motion_command(text: str) -> dict | None:
+    normalized = re.sub(r"[\s,，。.!！?？]+", "", text.strip().lower())
+    if not normalized:
+        return None
+
+    number_pattern = r"([0-9０-９]+(?:[.．][0-9０-９]+)?|[零〇一二两三四五六七八九十百]+)"
+    direction_pattern = (
+        r"(左转|右转|转左|转右|向左|向右|往左|往右|朝左|朝右|左边|右边|"
+        r"抬头|低头|向上|向下|往上|往下|朝上|朝下|上面|下面|左|右|上|下|"
+        r"left|right|up|down)"
+    )
+    action_pattern = r"(?:转|转动|移动|动|摆|看|运动)?"
+    patterns = (
+        re.compile(direction_pattern + action_pattern + number_pattern + r"(?:度|degrees?|°)"),
+        re.compile(number_pattern + r"(?:度|degrees?|°)" + action_pattern + direction_pattern),
+    )
+
+    for pattern in patterns:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        first, second = match.group(1), match.group(2)
+        if first in MOTION_DIRECTION_ALIASES:
+            direction_text, number_text = first, second
+        else:
+            number_text, direction_text = first, second
+        degree = parse_spoken_number(number_text)
+        direction = MOTION_DIRECTION_ALIASES.get(direction_text)
+        if direction and degree is not None and degree > 0:
+            return {
+                "type": direction,
+                "degree": degree,
+                "duration_ms": 500,
+                "source_text": text,
+            }
+    return None
 
 
 class AliyunVoiceServer(ThreadingHTTPServer):
@@ -267,15 +389,24 @@ class Handler(BaseHTTPRequestHandler):
 
         response = {"type": "stt", "text": text, "task_id": result.get("task_id", ""), "device_id": device_id}
         if text:
-            reply = f"我听到你说：{text}"
-            command = make_command(
-                "sequence",
-                [
-                    {"type": "face", "expression": "thinking"},
-                    {"type": "speak", "text": reply},
-                    {"type": "face", "expression": "happy"},
-                ],
-            )
+            motion_payload = parse_voice_motion_command(text)
+            if motion_payload:
+                source_text = motion_payload.pop("source_text", text)
+                command = make_command("motion", motion_payload, priority=1, interrupt=True)
+                response["handled_as"] = "motion"
+                response["motion"] = motion_payload
+                response["source_text"] = source_text
+            else:
+                reply = f"我听到你说：{text}"
+                command = make_command(
+                    "sequence",
+                    [
+                        {"type": "face", "expression": "thinking"},
+                        {"type": "speak", "text": reply},
+                        {"type": "face", "expression": "happy"},
+                    ],
+                )
+                response["handled_as"] = "repeat"
             self._enqueue_command(device_id, command)
             response["queued_command"] = command["cmd_id"]
         self._send_json(response)
