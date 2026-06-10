@@ -44,8 +44,6 @@ void run_camera_upload_app();
 void run_tracking_user_demo();
 static bool wifi_is_connected();
 
-extern const uint8_t happy_face_png_start[] asm("_binary_happy_face_png_start");
-extern const uint8_t happy_face_png_end[] asm("_binary_happy_face_png_end");
 extern const uint8_t calm_face_png_start[] asm("_binary_calm_face_png_start");
 extern const uint8_t calm_face_png_end[] asm("_binary_calm_face_png_end");
 extern const uint8_t speak1_face_png_start[] asm("_binary_speak1_face_png_start");
@@ -60,6 +58,14 @@ extern const uint8_t blink_half_face_png_start[] asm("_binary_blink_half_face_pn
 extern const uint8_t blink_half_face_png_end[] asm("_binary_blink_half_face_png_end");
 extern const uint8_t blink_closed_face_png_start[] asm("_binary_blink_closed_face_png_start");
 extern const uint8_t blink_closed_face_png_end[] asm("_binary_blink_closed_face_png_end");
+extern const uint8_t wink_half_face_png_start[] asm("_binary_wink_half_face_png_start");
+extern const uint8_t wink_half_face_png_end[] asm("_binary_wink_half_face_png_end");
+extern const uint8_t wink_closed_face_png_start[] asm("_binary_wink_closed_face_png_start");
+extern const uint8_t wink_closed_face_png_end[] asm("_binary_wink_closed_face_png_end");
+extern const uint8_t heart_small_face_png_start[] asm("_binary_heart_small_face_png_start");
+extern const uint8_t heart_small_face_png_end[] asm("_binary_heart_small_face_png_end");
+extern const uint8_t heart_face_png_start[] asm("_binary_heart_face_png_start");
+extern const uint8_t heart_face_png_end[] asm("_binary_heart_face_png_end");
 extern const uint8_t nod_soft_face_png_start[] asm("_binary_nod_soft_face_png_start");
 extern const uint8_t nod_soft_face_png_end[] asm("_binary_nod_soft_face_png_end");
 extern const uint8_t nod_down_face_png_start[] asm("_binary_nod_down_face_png_start");
@@ -119,8 +125,8 @@ static constexpr float kTrackingPitchDirection = -1.0f;
 static constexpr int kTrackingScanStepCount = 5;
 static constexpr int kTrackingRefineRounds = 3;
 static constexpr float kTrackingStopPixels = 16.0f;
-static constexpr float kTrackingYawMinDeg = -75.0f;
-static constexpr float kTrackingYawMaxDeg = 75.0f;
+static constexpr float kTrackingYawMinDeg = -180.0f;
+static constexpr float kTrackingYawMaxDeg = 180.0f;
 static constexpr float kTrackingPitchMinDeg = 0.0f;
 static constexpr float kTrackingPitchMaxDeg = 90.0f;
 static constexpr float kTrackingHomePitchDeg = 45.0f;
@@ -139,6 +145,35 @@ static constexpr float kServoStepsPerDegree = 3.2f;
 static constexpr uint8_t kPy32Address = 0x6f;
 static constexpr uint8_t kPy32ServoPowerPin = 0;
 static constexpr uint32_t kPy32I2cFreq = 100000;
+static constexpr uint8_t kSi12tAddress = 0x68;
+static constexpr uint8_t kSi12tSensitivity1Reg = 0x02;
+static constexpr uint8_t kSi12tCtrl1Reg = 0x08;
+static constexpr uint8_t kSi12tCtrl2Reg = 0x09;
+static constexpr uint8_t kSi12tRefRst1Reg = 0x0a;
+static constexpr uint8_t kSi12tRefRst2Reg = 0x0b;
+static constexpr uint8_t kSi12tChHold1Reg = 0x0c;
+static constexpr uint8_t kSi12tChHold2Reg = 0x0d;
+static constexpr uint8_t kSi12tCalHold1Reg = 0x0e;
+static constexpr uint8_t kSi12tCalHold2Reg = 0x0f;
+static constexpr uint8_t kSi12tOutput1Reg = 0x10;
+static constexpr uint32_t kSi12tI2cFreq = 100000;
+static constexpr uint32_t kHeadTouchPollMs = 50;
+static constexpr uint32_t kHeadTouchClickMaxMs = 650;
+static constexpr int16_t kHeadTouchSwipeThreshold = 40;
+static constexpr uint32_t kHeadTouchTaskStackBytes = 6 * 1024;
+static constexpr uint32_t kHeadTouchAudioTaskStackBytes = 16 * 1024;
+static constexpr uint32_t kSpeakerDrainMs = 180;
+
+static void configure_speaker_for_tts()
+{
+    auto spk_cfg = M5.Speaker.config();
+    spk_cfg.sample_rate = kTtsStreamSampleRate;
+    spk_cfg.dma_buf_len = 512;
+    spk_cfg.dma_buf_count = 12;
+    spk_cfg.task_priority = 4;
+    spk_cfg.task_pinned_core = 0;
+    M5.Speaker.config(spk_cfg);
+}
 
 AppId current_app = AppId::Launcher;
 int selected_menu = 0;
@@ -151,8 +186,12 @@ TaskHandle_t command_task_handle = nullptr;
 TaskHandle_t boot_task_handle = nullptr;
 TaskHandle_t speak_animation_task_handle = nullptr;
 TaskHandle_t expression_animation_task_handle = nullptr;
+TaskHandle_t head_touch_task_handle = nullptr;
+TaskHandle_t head_touch_audio_task_handle = nullptr;
 EventGroupHandle_t wifi_event_group = nullptr;
 SemaphoreHandle_t m5_mutex = nullptr;
+SemaphoreHandle_t audio_mutex = nullptr;
+QueueHandle_t head_touch_event_queue = nullptr;
 int wifi_retry_count = 0;
 bool wifi_started = false;
 volatile bool wifi_manual_switching = false;
@@ -173,6 +212,13 @@ std::string active_wifi_ssid = CONFIG_STACKCHAN_WIFI_SSID;
 std::string active_server_base = "http://192.168.21.15:8091";
 bool active_server_selected = false;
 int active_wifi_candidate_index = -1;
+
+enum class HeadTouchEvent : uint8_t {
+    Press,
+    Click,
+    SwipeForward,
+    SwipeBackward,
+};
 
 struct WifiCandidate {
     const char* ssid;
@@ -210,13 +256,16 @@ struct ExpressionAnimation {
 static constexpr const char* kDefaultExpression = "calm";
 static const ExpressionAsset kExpressionAssets[] = {
     {"calm", calm_face_png_start, calm_face_png_end, 320, 240},
-    {"happy", happy_face_png_start, happy_face_png_end, 320, 240},
     {"speak1", speak1_face_png_start, speak1_face_png_end, 320, 240},
     {"speak2", speak2_face_png_start, speak2_face_png_end, 320, 240},
     {"shy", shy_face_png_start, shy_face_png_end, 320, 240},
     {"thinking", thinking_face_png_start, thinking_face_png_end, 320, 240},
     {"blink_half", blink_half_face_png_start, blink_half_face_png_end, 320, 240},
     {"blink_closed", blink_closed_face_png_start, blink_closed_face_png_end, 320, 240},
+    {"wink_half", wink_half_face_png_start, wink_half_face_png_end, 320, 240},
+    {"wink_closed", wink_closed_face_png_start, wink_closed_face_png_end, 320, 240},
+    {"heart_small", heart_small_face_png_start, heart_small_face_png_end, 320, 240},
+    {"heart", heart_face_png_start, heart_face_png_end, 320, 240},
     {"nod_soft", nod_soft_face_png_start, nod_soft_face_png_end, 320, 240},
     {"nod_down", nod_down_face_png_start, nod_down_face_png_end, 320, 240},
     {"happy_squint", happy_squint_face_png_start, happy_squint_face_png_end, 320, 240},
@@ -231,12 +280,33 @@ static constexpr const char* kBlinkFrames[] = {
     "calm",
     "calm",
 };
+static constexpr const char* kWinkFrames[] = {
+    "calm",
+    "wink_half",
+    "wink_closed",
+    "wink_half",
+    "calm",
+    "wink_closed",
+    "calm",
+};
+static constexpr const char* kHeartFrames[] = {
+    "calm",
+    "heart_small",
+    "heart",
+    "heart",
+    "heart_small",
+    "heart",
+};
 static constexpr const char* kNodFrames[] = {
     "calm",
     "nod_soft",
     "nod_down",
     "nod_soft",
     "calm",
+};
+static constexpr const char* kSpeakFrames[] = {
+    "speak1",
+    "speak2",
 };
 static constexpr const char* kHappyDynamicFrames[] = {
     "happy_squint_soft",
@@ -246,8 +316,13 @@ static constexpr const char* kHappyDynamicFrames[] = {
 };
 static constexpr ExpressionAnimation kExpressionAnimations[] = {
     {"blink", kBlinkFrames, sizeof(kBlinkFrames) / sizeof(kBlinkFrames[0]), 140},
+    {"wink", kWinkFrames, sizeof(kWinkFrames) / sizeof(kWinkFrames[0]), 140},
+    {"heart_action", kHeartFrames, sizeof(kHeartFrames) / sizeof(kHeartFrames[0]), 170},
+    {"hearting", kHeartFrames, sizeof(kHeartFrames) / sizeof(kHeartFrames[0]), 170},
     {"nod", kNodFrames, sizeof(kNodFrames) / sizeof(kNodFrames[0]), 180},
     {"nodding", kNodFrames, sizeof(kNodFrames) / sizeof(kNodFrames[0]), 180},
+    {"speak", kSpeakFrames, sizeof(kSpeakFrames) / sizeof(kSpeakFrames[0]), 160},
+    {"speaking", kSpeakFrames, sizeof(kSpeakFrames) / sizeof(kSpeakFrames[0]), 160},
     {"happy_dynamic", kHappyDynamicFrames, sizeof(kHappyDynamicFrames) / sizeof(kHappyDynamicFrames[0]), 180},
     {"happy_squint_dynamic", kHappyDynamicFrames, sizeof(kHappyDynamicFrames) / sizeof(kHappyDynamicFrames[0]), 180},
 };
@@ -1895,7 +1970,7 @@ static std::vector<int16_t> record_pcm_after_trigger(const std::vector<int16_t>&
     int32_t smooth_level = trigger_level;
 
     set_app1_status("Recording", "Voice threshold hit", "Pre-roll captured", "");
-    while (!app1_stop_requested && elapsed_ms < kRecordMaxMs && pcm.size() < max_samples) {
+    while (!app1_stop_requested && !voice_listener_paused && elapsed_ms < kRecordMaxMs && pcm.size() < max_samples) {
         if (!mic_record_blocking(chunk.data(), chunk.size(), kRecordSampleRate)) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -1999,12 +2074,12 @@ static void run_local_record_upload_loop()
             last_status_ms = now;
         }
 
-        if (smooth_level >= kVoiceStartThreshold) {
+        if (!voice_listener_paused && smooth_level >= kVoiceStartThreshold) {
             ESP_LOGI(TAG, "Voice threshold triggered: level=%ld smooth=%ld start=%d stop=%d pre_roll=%ums sample_rate=%d",
                      static_cast<long>(level), static_cast<long>(smooth_level), kVoiceStartThreshold,
                      kVoiceStopThreshold, kPreRollMs, kRecordSampleRate);
             auto pcm = record_pcm_after_trigger(pre_roll, smooth_level);
-            if (!pcm.empty() && !app1_stop_requested) {
+            if (!pcm.empty() && !app1_stop_requested && !voice_listener_paused) {
                 upload_wav_recording(pcm);
             }
             pre_roll.clear();
@@ -2960,11 +3035,12 @@ static bool play_stream_pcm_chunk(const int16_t* samples, size_t sample_count)
     return true;
 }
 
-static bool stream_tts_pcm_for_text(const char* text)
+static bool stream_pcm_url(const std::string& url, const char* label, bool update_tts_status)
 {
-    std::string url = make_stream_tts_url_for_text(text);
-    ESP_LOGI(TAG, "Stream TTS URL: %s", url.c_str());
-    set_tts_status("Requesting", make_server_url("/stream-speak").c_str(), text != nullptr ? text : "");
+    ESP_LOGI(TAG, "Stream PCM URL: %s", url.c_str());
+    if (update_tts_status) {
+        set_tts_status("Requesting", url.c_str(), label != nullptr ? label : "");
+    }
 
     esp_http_client_config_t config = {};
     config.url = url.c_str();
@@ -2975,32 +3051,40 @@ static bool stream_tts_pcm_for_text(const char* text)
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == nullptr) {
-        set_tts_status("HTTP Fail", "esp_http_client_init failed", "", "", false, false);
+        if (update_tts_status) {
+            set_tts_status("HTTP Fail", "esp_http_client_init failed", "", "", false, false);
+        }
         return false;
     }
 
     esp_http_client_set_header(client, "Accept", "application/octet-stream");
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Stream TTS open failed: %s", esp_err_to_name(err));
-        set_tts_status("HTTP Fail", esp_err_to_name(err), "Check stream TTS URL/IP", "", false, false);
+        ESP_LOGE(TAG, "Stream PCM open failed: %s", esp_err_to_name(err));
+        if (update_tts_status) {
+            set_tts_status("HTTP Fail", esp_err_to_name(err), "Check PCM URL/IP", "", false, false);
+        }
         esp_http_client_cleanup(client);
         return false;
     }
 
     int content_length = esp_http_client_fetch_headers(client);
     int status = esp_http_client_get_status_code(client);
-    ESP_LOGI(TAG, "Stream TTS HTTP status=%d content_length=%d", status, content_length);
+    ESP_LOGI(TAG, "Stream PCM HTTP status=%d content_length=%d", status, content_length);
     if (status < 200 || status >= 300) {
-        char line[48];
-        snprintf(line, sizeof(line), "HTTP status %d", status);
-        set_tts_status("HTTP Status", line, "Expected PCM stream", "", false, false);
+        if (update_tts_status) {
+            char line[48];
+            snprintf(line, sizeof(line), "HTTP status %d", status);
+            set_tts_status("HTTP Status", line, "Expected PCM stream", "", false, false);
+        }
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return false;
     }
 
-    set_tts_status("Playing", "Receiving pcm_s16le", "16kHz mono stream", "");
+    if (update_tts_status) {
+        set_tts_status("Playing", "Receiving pcm_s16le", "16kHz mono stream", "");
+    }
     std::vector<std::vector<int16_t>> buffers(3, std::vector<int16_t>(kTtsStreamBufferSamples));
     int buffer_index = 0;
     size_t sample_pos = 0;
@@ -3022,8 +3106,10 @@ static bool stream_tts_pcm_for_text(const char* text)
     while (!app2_stop_requested) {
         int read_len = esp_http_client_read(client, reinterpret_cast<char*>(read_buffer), sizeof(read_buffer));
         if (read_len < 0) {
-            ESP_LOGE(TAG, "Stream TTS read failed");
-            set_tts_status("Read Fail", "HTTP body read failed", "", "", false, false);
+            ESP_LOGE(TAG, "Stream PCM read failed");
+            if (update_tts_status) {
+                set_tts_status("Read Fail", "HTTP body read failed", "", "", false, false);
+            }
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return false;
@@ -3077,14 +3163,25 @@ static bool stream_tts_pcm_for_text(const char* text)
     M5.Speaker.stop();
 
     if (app2_stop_requested) {
-        set_tts_status("Stopped", "TTS stopped", "", "", false, false);
+        if (update_tts_status) {
+            set_tts_status("Stopped", "TTS stopped", "", "", false, false);
+        }
         return false;
     }
 
-    char line[64];
-    snprintf(line, sizeof(line), "streamed %u bytes", static_cast<unsigned>(total_bytes));
-    set_tts_status("Done", line, "Tap TTS to speak again", "", false, true);
+    if (update_tts_status) {
+        char line[64];
+        snprintf(line, sizeof(line), "streamed %u bytes", static_cast<unsigned>(total_bytes));
+        set_tts_status("Done", line, "Tap TTS to speak again", "", false, true);
+    }
     return true;
+}
+
+static bool stream_tts_pcm_for_text(const char* text)
+{
+    std::string url = make_stream_tts_url_for_text(text);
+    ESP_LOGI(TAG, "Stream TTS URL: %s", url.c_str());
+    return stream_pcm_url(url, text, true);
 }
 
 static bool stream_tts_pcm()
@@ -3330,19 +3427,340 @@ static bool execute_speak_command(const char* text)
     }
     M5.Mic.end();
 
+    if (audio_mutex != nullptr) {
+        xSemaphoreTake(audio_mutex, portMAX_DELAY);
+    }
     if (!M5.Speaker.begin()) {
         ESP_LOGE(TAG, "M5.Speaker.begin failed for command speak");
+        if (audio_mutex != nullptr) {
+            xSemaphoreGive(audio_mutex);
+        }
         voice_listener_paused = false;
         return false;
     }
     M5.Speaker.setVolume(CONFIG_STACKCHAN_TTS_VOLUME);
     app2_stop_requested = false;
+    M5.Speaker.stop();
     start_speaking_animation();
     bool ok = stream_tts_pcm_for_text(text);
     M5.Speaker.end();
     stop_speaking_animation();
+    if (audio_mutex != nullptr) {
+        xSemaphoreGive(audio_mutex);
+    }
     voice_listener_paused = false;
     return ok;
+}
+
+static const char* head_touch_event_name(HeadTouchEvent event)
+{
+    switch (event) {
+        case HeadTouchEvent::Press:
+            return "press";
+        case HeadTouchEvent::Click:
+            return "click";
+        case HeadTouchEvent::SwipeForward:
+            return "swipe_forward";
+        case HeadTouchEvent::SwipeBackward:
+            return "swipe_backward";
+    }
+    return "press";
+}
+
+static void enqueue_head_touch_event(HeadTouchEvent event)
+{
+    if (head_touch_event_queue == nullptr) {
+        return;
+    }
+    xQueueSend(head_touch_event_queue, &event, 0);
+    ESP_LOGI(TAG, "Head touch event: %s", head_touch_event_name(event));
+}
+
+static bool si12t_write_reg(uint8_t reg, uint8_t value)
+{
+    M5Lock lock;
+    return M5.In_I2C.writeRegister8(kSi12tAddress, reg, value, kSi12tI2cFreq);
+}
+
+static bool si12t_read_reg(uint8_t reg, uint8_t* value)
+{
+    if (value == nullptr) {
+        return false;
+    }
+    M5Lock lock;
+    if (!M5.In_I2C.scanID(kSi12tAddress, kSi12tI2cFreq)) {
+        return false;
+    }
+    *value = M5.In_I2C.readRegister8(kSi12tAddress, reg, kSi12tI2cFreq);
+    return true;
+}
+
+static bool init_head_touch_sensor()
+{
+    {
+        M5Lock lock;
+        if (!M5.In_I2C.scanID(kSi12tAddress, kSi12tI2cFreq)) {
+            ESP_LOGW(TAG, "Si12T head touch sensor not found at 0x%02x", kSi12tAddress);
+            return false;
+        }
+    }
+
+    bool ok = true;
+    ok &= si12t_write_reg(kSi12tRefRst1Reg, 0x00);
+    ok &= si12t_write_reg(kSi12tRefRst2Reg, 0x00);
+    ok &= si12t_write_reg(kSi12tChHold1Reg, 0x00);
+    ok &= si12t_write_reg(kSi12tChHold2Reg, 0x00);
+    ok &= si12t_write_reg(kSi12tCalHold1Reg, 0x00);
+    ok &= si12t_write_reg(kSi12tCalHold2Reg, 0x00);
+    ok &= si12t_write_reg(kSi12tCtrl2Reg, 0x0f);
+    ok &= si12t_write_reg(kSi12tCtrl2Reg, 0x07);
+    ok &= si12t_write_reg(kSi12tCtrl1Reg, 0x22);
+    for (uint8_t reg = kSi12tSensitivity1Reg; reg < kSi12tSensitivity1Reg + 5; ++reg) {
+        ok &= si12t_write_reg(reg, 0xcc);
+    }
+    ESP_LOGI(TAG, "Si12T head touch init %s", ok ? "ok" : "failed");
+    return ok;
+}
+
+static bool read_head_touch_intensities(uint8_t intensities[3])
+{
+    uint8_t raw = 0;
+    if (!si12t_read_reg(kSi12tOutput1Reg, &raw)) {
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        intensities[(3 - 1) - i] = (raw >> (i * 2)) & 0x03;
+    }
+    return true;
+}
+
+static bool head_touch_is_touched(const uint8_t intensities[3])
+{
+    return intensities[0] > 0 || intensities[1] > 0 || intensities[2] > 0;
+}
+
+static int16_t head_touch_position(const uint8_t intensities[3])
+{
+    uint16_t total = intensities[0] + intensities[1] + intensities[2];
+    if (total == 0) {
+        return 0;
+    }
+    int32_t weighted = static_cast<int32_t>(intensities[0]) * -100 + static_cast<int32_t>(intensities[2]) * 100;
+    return static_cast<int16_t>(weighted / total);
+}
+
+static bool play_pcm_url_buffered(const std::string& url, const char* label)
+{
+    ESP_LOGI(TAG, "Buffered PCM URL: %s", url.c_str());
+    esp_http_client_config_t config = {};
+    config.url = url.c_str();
+    config.method = HTTP_METHOD_GET;
+    config.timeout_ms = 15000;
+    config.buffer_size = kHttpBufferSize;
+    config.buffer_size_tx = kHttpBufferSize;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) {
+        ESP_LOGE(TAG, "Buffered PCM init failed");
+        return false;
+    }
+
+    esp_http_client_set_header(client, "Accept", "application/octet-stream");
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Buffered PCM open failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "Buffered PCM HTTP status=%d content_length=%d label=%s", status, content_length,
+             label != nullptr ? label : "");
+    if (status < 200 || status >= 300) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    std::vector<uint8_t> bytes;
+    if (content_length > 0 && static_cast<size_t>(content_length) <= kTtsMaxBytes) {
+        bytes.reserve(content_length);
+    }
+
+    uint8_t read_buffer[kHttpBufferSize];
+    while (!app2_stop_requested) {
+        int read_len = esp_http_client_read(client, reinterpret_cast<char*>(read_buffer), sizeof(read_buffer));
+        if (read_len < 0) {
+            ESP_LOGE(TAG, "Buffered PCM read failed");
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        if (read_len == 0) {
+            break;
+        }
+        if (bytes.size() + static_cast<size_t>(read_len) > kTtsMaxBytes) {
+            ESP_LOGE(TAG, "Buffered PCM exceeds max bytes");
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        bytes.insert(bytes.end(), read_buffer, read_buffer + read_len);
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (bytes.size() < 2 || app2_stop_requested) {
+        return false;
+    }
+    if ((bytes.size() & 1) != 0) {
+        bytes.pop_back();
+    }
+
+    std::vector<int16_t> samples(bytes.size() / sizeof(int16_t));
+    memcpy(samples.data(), bytes.data(), samples.size() * sizeof(int16_t));
+
+    M5.Speaker.stop();
+    if (!M5.Speaker.playRaw(samples.data(), samples.size(), kTtsStreamSampleRate, false, 1, 0, false)) {
+        ESP_LOGE(TAG, "Buffered PCM playRaw failed");
+        return false;
+    }
+
+    while (M5.Speaker.isPlaying() && !app2_stop_requested) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!app2_stop_requested) {
+        vTaskDelay(pdMS_TO_TICKS(kSpeakerDrainMs));
+    }
+    M5.Speaker.stop();
+    return !app2_stop_requested;
+}
+
+static void play_head_touch_event_audio(HeadTouchEvent event)
+{
+    const char* name = head_touch_event_name(event);
+    std::string url = make_server_url("/event-audio/");
+    url += name;
+    url += ".pcm";
+
+    voice_listener_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(120));
+    while (M5.Mic.isRecording()) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    M5.Mic.end();
+
+    if (audio_mutex != nullptr) {
+        xSemaphoreTake(audio_mutex, portMAX_DELAY);
+    }
+    if (!M5.Speaker.begin()) {
+        ESP_LOGE(TAG, "M5.Speaker.begin failed for head touch event");
+        if (audio_mutex != nullptr) {
+            xSemaphoreGive(audio_mutex);
+        }
+        voice_listener_paused = false;
+        return;
+    }
+    M5.Speaker.setVolume(CONFIG_STACKCHAN_TTS_VOLUME);
+    app2_stop_requested = false;
+    start_speaking_animation();
+    play_pcm_url_buffered(url, name);
+    M5.Speaker.end();
+    stop_speaking_animation();
+    if (audio_mutex != nullptr) {
+        xSemaphoreGive(audio_mutex);
+    }
+    voice_listener_paused = false;
+}
+
+static void run_head_touch_audio_loop()
+{
+    while (true) {
+        HeadTouchEvent event = HeadTouchEvent::Press;
+        if (xQueueReceive(head_touch_event_queue, &event, portMAX_DELAY) == pdTRUE) {
+            play_head_touch_event_audio(event);
+        }
+    }
+}
+
+static void run_head_touch_loop()
+{
+    if (!init_head_touch_sensor()) {
+        head_touch_task_handle = nullptr;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    bool was_touched = false;
+    bool swipe_reported = false;
+    int16_t initial_position = 0;
+    int64_t touch_started_us = 0;
+    uint8_t intensities[3] = {};
+
+    while (true) {
+        if (camera_owns_internal_i2c) {
+            vTaskDelay(pdMS_TO_TICKS(kHeadTouchPollMs));
+            continue;
+        }
+
+        if (!read_head_touch_intensities(intensities)) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        bool touched = head_touch_is_touched(intensities);
+        int16_t position = head_touch_position(intensities);
+        int64_t now_us = esp_timer_get_time();
+
+        if (touched && !was_touched) {
+            was_touched = true;
+            swipe_reported = false;
+            initial_position = position;
+            touch_started_us = now_us;
+        } else if (touched && was_touched && !swipe_reported) {
+            int16_t delta = position - initial_position;
+            if (delta > kHeadTouchSwipeThreshold) {
+                swipe_reported = true;
+                enqueue_head_touch_event(HeadTouchEvent::SwipeBackward);
+            } else if (delta < -kHeadTouchSwipeThreshold) {
+                swipe_reported = true;
+                enqueue_head_touch_event(HeadTouchEvent::SwipeForward);
+            }
+        } else if (!touched && was_touched) {
+            uint32_t held_ms = static_cast<uint32_t>((now_us - touch_started_us) / 1000);
+            if (!swipe_reported && held_ms <= kHeadTouchClickMaxMs) {
+                enqueue_head_touch_event(HeadTouchEvent::Click);
+            } else if (!swipe_reported) {
+                enqueue_head_touch_event(HeadTouchEvent::Press);
+            }
+            was_touched = false;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(kHeadTouchPollMs));
+    }
+}
+
+static void start_head_touch_services()
+{
+    if (head_touch_event_queue == nullptr) {
+        head_touch_event_queue = xQueueCreate(8, sizeof(HeadTouchEvent));
+    }
+    if (head_touch_event_queue == nullptr) {
+        ESP_LOGE(TAG, "Failed to create head touch event queue");
+        return;
+    }
+    if (head_touch_audio_task_handle == nullptr) {
+        xTaskCreatePinnedToCore([](void*) {
+            run_head_touch_audio_loop();
+        }, "headtouch_audio", kHeadTouchAudioTaskStackBytes, nullptr, 2, &head_touch_audio_task_handle, 0);
+    }
+    if (head_touch_task_handle == nullptr) {
+        xTaskCreatePinnedToCore([](void*) {
+            run_head_touch_loop();
+        }, "headtouch", kHeadTouchTaskStackBytes, nullptr, 2, &head_touch_task_handle, 1);
+    }
 }
 
 static bool execute_command_object(const cJSON* command)
@@ -3359,7 +3777,7 @@ static bool execute_command_object(const cJSON* command)
 
     if (type == "face") {
         std::string expression = json_string_value(payload, "expression");
-        show_expression(expression.empty() ? "happy" : expression.c_str());
+        show_expression(expression.empty() ? kDefaultExpression : expression.c_str());
         return true;
     }
     if (type == "speak") {
@@ -3499,6 +3917,7 @@ static void start_background_services()
         }
 
         show_expression(kDefaultExpression);
+        start_head_touch_services();
 
         if (xiaozhi_task_handle == nullptr) {
             app1_stop_requested = false;
@@ -3526,10 +3945,12 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(init_nvs_once());
     force_core_s3_display_board();
     m5_mutex = xSemaphoreCreateMutex();
+    audio_mutex = xSemaphoreCreateMutex();
     auto cfg = M5.config();
     cfg.internal_mic = true;
     cfg.internal_spk = true;
     M5.begin(cfg);
+    configure_speaker_for_tts();
 
     M5.Display.setBrightness(180);
     M5.Display.setRotation(1);

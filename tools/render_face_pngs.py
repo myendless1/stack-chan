@@ -192,17 +192,35 @@ def draw_mouth(c, outer, inner):
     c.fill_path(inner, mouth_gradient(190))
 
 
+def heart_points(cx, cy, scale):
+    points = []
+    for i in range(96):
+        t = 2 * math.pi * i / 96
+        x = 16 * math.sin(t) ** 3
+        y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+        points.append((cx + x * scale, cy - y * scale))
+    return points
+
+
+def draw_heart(c, cx, cy, scale):
+    outline = heart_points(cx, cy, scale * 1.08)
+    body = heart_points(cx, cy, scale)
+    shine = heart_points(cx - 7 * scale, cy - 5 * scale, scale * 0.18)
+    c.fill_path(outline, (132, 28, 52))
+    c.fill_path(body, (238, 66, 102))
+    c.fill_path(shine, (255, 147, 170))
+
+
+def draw_kiss_mouth(c):
+    c.stroke_cubic((152, 175), (172, 164), (181, 176), (162, 186), (10, 61, 135), 11)
+    c.stroke_cubic((162, 186), (181, 196), (170, 209), (151, 199), (10, 61, 135), 11)
+    c.stroke_cubic((152, 175), (172, 164), (181, 176), (162, 186), (102, 173, 255), 7)
+    c.stroke_cubic((162, 186), (181, 196), (170, 209), (151, 199), (102, 173, 255), 7)
+
+
 def face(kind):
     c = Canvas()
-    if kind == "happy":
-        draw_common(c)
-        c.fill_ellipse(228, 123, 39, 39, (0, 0, 0))
-        c.stroke_cubic((198, 139), (201, 125), (212, 113), (228, 113), (23, 61, 120), 14)
-        c.stroke_cubic((228, 113), (244, 113), (253, 127), (257, 141), (23, 61, 120), 14)
-        c.stroke_cubic((198, 139), (201, 125), (212, 113), (228, 113), (255, 255, 255), 10)
-        c.stroke_cubic((228, 113), (244, 113), (253, 127), (257, 141), (255, 255, 255), 10)
-        draw_mouth(c, [(139, 178), (142, 202), (151, 211), (160, 211), (169, 211), (178, 202), (181, 178)], [(142, 176), (145, 198), (152, 207), (160, 207), (168, 207), (175, 198), (178, 176)])
-    elif kind == "happy_squint":
+    if kind == "happy_squint":
         draw_common(c)
         draw_closed_eye(c, 92, smile=True)
         draw_closed_eye(c, 228, smile=True)
@@ -239,6 +257,26 @@ def face(kind):
         c.stroke_cubic((144, 189), (153, 183), (167, 183), (176, 189), (102, 173, 255), 6)
         c.fill_ellipse(198, 178, 5, 5, (102, 173, 255))
         c.fill_ellipse(209, 166, 4, 4, (102, 173, 255))
+    elif kind == "wink_half":
+        draw_common(c)
+        draw_half_eye(c, 228)
+        c.stroke_polyline([(145, 187), (175, 187)], (10, 61, 135), 12)
+        c.stroke_polyline([(145, 187), (175, 187)], (102, 173, 255), 8)
+    elif kind == "wink_closed":
+        draw_common(c)
+        draw_closed_eye(c, 228, smile=True, width=14)
+        c.stroke_cubic((144, 187), (152, 194), (168, 194), (176, 187), (10, 61, 135), 10)
+        c.stroke_cubic((144, 187), (152, 194), (168, 194), (176, 187), (102, 173, 255), 6)
+    elif kind == "heart_small":
+        draw_common(c)
+        draw_closed_eye(c, 228, smile=True, width=14)
+        draw_kiss_mouth(c)
+        draw_heart(c, 207, 181, 1.05)
+    elif kind == "heart":
+        draw_common(c)
+        draw_closed_eye(c, 228, smile=True, width=14)
+        draw_kiss_mouth(c)
+        draw_heart(c, 226, 180, 1.55)
     elif kind == "nod_soft":
         draw_common(c)
         draw_half_eye(c, 92)
@@ -265,13 +303,16 @@ def face(kind):
 
 for name in (
     "calm",
-    "happy",
     "speak1",
     "speak2",
     "shy",
     "thinking",
     "blink_half",
     "blink_closed",
+    "wink_half",
+    "wink_closed",
+    "heart_small",
+    "heart",
     "nod_soft",
     "nod_down",
     "happy_squint",

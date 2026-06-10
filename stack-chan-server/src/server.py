@@ -37,16 +37,20 @@ TOKEN_META_ENDPOINT = "https://nls-meta.cn-shanghai.aliyuncs.com/"
 TOKEN_REGION_ID = "cn-shanghai"
 TOKEN_API_VERSION = "2019-02-28"
 TOKEN_REFRESH_MARGIN_SECONDS = 300
+DEVICE_ONLINE_TTL_SECONDS = 90
 
 AVAILABLE_EXPRESSIONS = (
     "calm",
-    "happy",
     "shy",
     "thinking",
     "speak1",
     "speak2",
     "blink_half",
     "blink_closed",
+    "wink_half",
+    "wink_closed",
+    "heart_small",
+    "heart",
     "nod_soft",
     "nod_down",
     "happy_squint",
@@ -55,11 +59,23 @@ AVAILABLE_EXPRESSIONS = (
 
 AVAILABLE_ACTIONS = (
     "blink",
+    "wink",
+    "heart_action",
+    "hearting",
     "nod",
     "nodding",
+    "speak",
+    "speaking",
     "happy_dynamic",
     "happy_squint_dynamic",
 )
+
+HEAD_TOUCH_EVENT_TEXT = {
+    "press": "按压",
+    "click": "点击",
+    "swipe_forward": "前滑",
+    "swipe_backward": "后滑",
+}
 
 EXPRESSION_ALIASES = {
     "default": "calm",
@@ -67,13 +83,18 @@ EXPRESSION_ALIASES = {
     "stopped": "calm",
     "think": "thinking",
     "thinking": "thinking",
+    "heart": "heart_action",
+    "love": "heart_action",
+    "wink": "wink",
+    "blink": "blink",
     "shy": "shy",
-    "happy": "happy",
+    "happy": "happy_squint",
     "calm": "calm",
-    "开心": "happy_dynamic",
+    "开心": "happy_squint",
     "害羞": "shy",
+    "爱心": "heart_action",
     "思考": "thinking",
-    "眨眼": "blink",
+    "眨眼": "wink",
     "点头": "nod",
 }
 
@@ -109,6 +130,71 @@ MOTION_DIRECTION_ALIASES = {
     "up": "up",
     "down": "down",
 }
+
+MOTION_CENTER_PHRASES = (
+    "请回正",
+    "回正",
+    "回中",
+    "回中间",
+    "回到中间",
+    "回到正中",
+    "回到正中间",
+    "回到初始位置",
+    "回到初始",
+    "回初始位置",
+    "回初始",
+    "恢复初始位置",
+    "恢复初始",
+    "归位",
+    "复位",
+    "重置位置",
+    "回家",
+    "center",
+    "home",
+)
+
+VOICE_FACE_COMMAND_TRIGGERS = (
+    "切换到",
+    "切到",
+    "换成",
+    "切换",
+    "显示",
+    "设置为",
+    "设为",
+    "变成",
+    "做",
+    "表情",
+    "动作",
+    "expression",
+    "face",
+    "action",
+)
+
+VOICE_FACE_ALIASES = (
+    ("heart_action", ("爱心", "吐爱心", "亲亲爱心", "heart action", "hearting", "love")),
+    ("wink", ("眨眼", "眨一下眼", "单眼眨眼", "wink")),
+    ("thinking", ("思考", "思考表情", "想一想", "想一下", "thinking", "think")),
+    ("happy_squint_soft", ("眯眼笑", "眯眼微笑", "happy squint soft", "happy_squint_soft", "柔和眯眼笑", "柔和眯眼开心")),
+    ("happy_squint", ("开心表情", "开心", "高兴表情", "高兴", "快乐表情", "快乐", "happy squint", "happy_squint", "happy")),
+    ("speak", ("说话动作", "说话表情", "说话脸", "讲话动作", "讲话表情", "讲话脸", "speak", "speaking")),
+    ("calm", ("平静表情", "平静", "冷静表情", "冷静", "calm")),
+    ("shy", ("害羞表情", "害羞", "羞涩表情", "羞涩", "shy")),
+)
+
+JOKE_TEXT_XIAOMING_SLOW_SCHOOL = (
+    "老师问小明：“你为什么总是迟到？”\n"
+    "小明说：“因为路上有个牌子写着‘学校前方，请慢行’。”\n"
+    "老师气笑了：“那你也不能慢成这样吧？”\n"
+    "小明委屈地说：“我已经很努力了，今天还超速了两步。”"
+)
+
+VOICE_SPEAK_COMMANDS = (
+    {
+        "name": "joke_xiaoming_slow_school",
+        "aliases": ("讲个笑话", "说个笑话", "来个笑话", "讲笑话"),
+        "text": JOKE_TEXT_XIAOMING_SLOW_SCHOOL,
+    },
+)
 
 CHINESE_DIGITS = {
     "零": 0,
@@ -152,6 +238,28 @@ def detect_wav_sample_rate(data: bytes) -> int | None:
     return struct.unpack_from("<I", data, 24)[0]
 
 
+def read_binary_file(path: str) -> bytes:
+    with open(path, "rb") as fp:
+        return fp.read()
+
+
+def pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
+    data_size = len(pcm)
+    byte_rate = sample_rate * 2
+    return b"".join(
+        (
+            b"RIFF",
+            struct.pack("<I", 36 + data_size),
+            b"WAVE",
+            b"fmt ",
+            struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, byte_rate, 2, 16),
+            b"data",
+            struct.pack("<I", data_size),
+            pcm,
+        )
+    )
+
+
 def parse_chinese_integer(text: str) -> int | None:
     text = text.strip()
     if not text:
@@ -193,6 +301,13 @@ def parse_voice_motion_command(text: str) -> dict | None:
     if not normalized:
         return None
 
+    if any(phrase in normalized for phrase in MOTION_CENTER_PHRASES):
+        return {
+            "type": "center",
+            "duration_ms": 600,
+            "source_text": text,
+        }
+
     number_pattern = r"([0-9０-９]+(?:[.．][0-9０-９]+)?|[零〇一二两三四五六七八九十百]+)"
     direction_pattern = (
         r"(左转|右转|转左|转右|向左|向右|往左|往右|朝左|朝右|左边|右边|"
@@ -226,6 +341,46 @@ def parse_voice_motion_command(text: str) -> dict | None:
     return None
 
 
+def normalize_voice_command_text(text: str) -> str:
+    return re.sub(r"[\s,_\-，。.!！?？/（）()]+", "", text.strip().lower())
+
+
+def parse_voice_face_command(text: str) -> dict | None:
+    normalized = normalize_voice_command_text(text)
+    if not normalized:
+        return None
+
+    has_trigger = any(trigger in normalized for trigger in VOICE_FACE_COMMAND_TRIGGERS)
+    for expression, aliases in VOICE_FACE_ALIASES:
+        for alias in aliases:
+            alias_normalized = normalize_voice_command_text(alias)
+            if not alias_normalized:
+                continue
+            if normalized == alias_normalized or (has_trigger and alias_normalized in normalized):
+                return {
+                    "expression": expression,
+                    "source_text": text,
+                }
+    return None
+
+
+def parse_voice_speak_command(text: str) -> dict | None:
+    normalized = normalize_voice_command_text(text)
+    if not normalized:
+        return None
+
+    for command in VOICE_SPEAK_COMMANDS:
+        for alias in command["aliases"]:
+            alias_normalized = normalize_voice_command_text(alias)
+            if normalized == alias_normalized or alias_normalized in normalized:
+                return {
+                    "name": command["name"],
+                    "text": command["text"],
+                    "source_text": text,
+                }
+    return None
+
+
 class AliyunVoiceServer(ThreadingHTTPServer):
     token: str
     token_expire_time: int
@@ -245,9 +400,11 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     tts_request_timeout: int
     tts_retries: int
     capture_dir: str
+    static_dir: str
     device_queues: dict[str, Queue]
     last_ack: dict[str, dict]
     last_seen: dict[str, float]
+    device_order: list[str]
 
     def get_token(self) -> str:
         if self.access_key_id and self.access_key_secret:
@@ -279,6 +436,7 @@ class Handler(BaseHTTPRequestHandler):
                     "voice": self.server.voice,
                     "expressions": list(AVAILABLE_EXPRESSIONS),
                     "actions": list(AVAILABLE_ACTIONS),
+                    "head_touch_events": HEAD_TOUCH_EVENT_TEXT,
                 }
             )
             return
@@ -319,6 +477,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/device/ack":
             self._handle_ack(query)
+            return
+        if path == "/head-touch-events":
+            self._send_json(
+                {
+                    "type": "head_touch_events",
+                    "events": [
+                        {
+                            "name": name,
+                            "text": text,
+                            "audio": f"/event-audio/{name}.pcm",
+                            "wav": f"/event-audio/{name}.wav",
+                        }
+                        for name, text in HEAD_TOUCH_EVENT_TEXT.items()
+                    ],
+                    "format": "pcm_s16le",
+                    "sample_rate": self.server.sample_rate,
+                    "channels": 1,
+                }
+            )
+            return
+        if path.startswith("/event-audio/"):
+            self._handle_event_audio(path.rsplit("/", 1)[-1])
             return
         if path == "/stream-speak":
             self._handle_stream_speak(query.get("text", [""])[0])
@@ -369,6 +549,7 @@ class Handler(BaseHTTPRequestHandler):
 
         path, query = self._path_query()
         device_id = self._device_id(query)
+        self._mark_device_seen(device_id)
         sample_rate = detect_wav_sample_rate(body) or self.server.sample_rate
         audio_format = "wav" if detect_wav_sample_rate(body) else "pcm"
         print(f"ASR upload: device={device_id} bytes={len(body)} format={audio_format} sample_rate={sample_rate}")
@@ -389,12 +570,25 @@ class Handler(BaseHTTPRequestHandler):
 
         response = {"type": "stt", "text": text, "task_id": result.get("task_id", ""), "device_id": device_id}
         if text:
-            motion_payload = parse_voice_motion_command(text)
-            if motion_payload:
+            speak_payload = parse_voice_speak_command(text)
+            if speak_payload:
+                source_text = speak_payload.pop("source_text", text)
+                command_name = speak_payload.pop("name", "")
+                command = make_command("speak", speak_payload, priority=1, interrupt=True)
+                response["handled_as"] = "speak"
+                response["speak"] = {"name": command_name}
+                response["source_text"] = source_text
+            elif motion_payload := parse_voice_motion_command(text):
                 source_text = motion_payload.pop("source_text", text)
                 command = make_command("motion", motion_payload, priority=1, interrupt=True)
                 response["handled_as"] = "motion"
                 response["motion"] = motion_payload
+                response["source_text"] = source_text
+            elif face_payload := parse_voice_face_command(text):
+                source_text = face_payload.pop("source_text", text)
+                command = make_command("face", face_payload, priority=1, interrupt=True)
+                response["handled_as"] = "face"
+                response["face"] = face_payload
                 response["source_text"] = source_text
             else:
                 reply = f"我听到你说：{text}"
@@ -403,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
                     [
                         {"type": "face", "expression": "thinking"},
                         {"type": "speak", "text": reply},
-                        {"type": "face", "expression": "happy"},
+                        {"type": "face", "expression": "happy_squint"},
                     ],
                 )
                 response["handled_as"] = "repeat"
@@ -414,17 +608,34 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_devices(self):
         now = time.time()
         devices = []
-        for device_id, seen in sorted(self.server.last_seen.items()):
+        known_device_ids = list(self.server.device_order)
+        for device_id in self.server.last_seen:
+            if device_id not in self.server.device_order:
+                known_device_ids.append(device_id)
+        for device_id in known_device_ids:
+            seen = self.server.last_seen.get(device_id)
+            if seen is None:
+                continue
             queue = self._queue_for(device_id)
             devices.append(
                 {
                     "device_id": device_id,
                     "last_seen_seconds_ago": round(now - seen, 1),
+                    "online": now - seen <= DEVICE_ONLINE_TTL_SECONDS,
                     "pending_commands": queue.qsize(),
                     "last_ack": self.server.last_ack.get(device_id),
                 }
             )
-        self._send_json({"type": "devices", "devices": devices})
+        self._send_json(
+            {
+                "type": "devices",
+                "default_device_id": first_connected_device_id(
+                    self.server.last_seen, self.server.device_order
+                ),
+                "online_ttl_seconds": DEVICE_ONLINE_TTL_SECONDS,
+                "devices": devices,
+            }
+        )
 
     def _handle_command(self, query: dict, command_type: str = "", posted: dict | None = None):
         posted = posted or {}
@@ -444,11 +655,11 @@ class Handler(BaseHTTPRequestHandler):
         else:
             command_wire_type = "motion" if command_type == "move" else command_type
         if command_wire_type == "face" and isinstance(payload, dict):
-            payload["expression"] = normalize_expression_name(payload.get("expression") or payload.get("face") or "happy")
+            payload["expression"] = normalize_expression_name(payload.get("expression") or payload.get("face") or "calm")
         elif command_wire_type == "sequence" and isinstance(payload, list):
             for step in payload:
                 if isinstance(step, dict) and step.get("type") == "face":
-                    step["expression"] = normalize_expression_name(step.get("expression") or step.get("face") or "happy")
+                    step["expression"] = normalize_expression_name(step.get("expression") or step.get("face") or "calm")
         command = make_command(command_wire_type, payload, priority=priority, interrupt=interrupt)
         self._enqueue_command(device_id, command)
         self._send_json({"type": "queued", "device_id": device_id, "command": command})
@@ -497,7 +708,7 @@ class Handler(BaseHTTPRequestHandler):
         device_id = self._device_id(query)
         timeout = float(first_value(query, "timeout") or "25")
         timeout = max(0.0, min(timeout, 55.0))
-        self.server.last_seen[device_id] = time.time()
+        self._mark_device_seen(device_id)
         queue = self._queue_for(device_id)
         try:
             command = queue.get(timeout=timeout)
@@ -515,7 +726,7 @@ class Handler(BaseHTTPRequestHandler):
             "ts": time.time(),
         }
         self.server.last_ack[device_id] = ack
-        self.server.last_seen[device_id] = time.time()
+        self._mark_device_seen(device_id)
         self._send_json({"type": "ack", "device_id": device_id, "ack": ack})
 
     def _device_id(self, query: dict) -> str:
@@ -525,9 +736,9 @@ class Handler(BaseHTTPRequestHandler):
     def _resolve_command_device_id(self, requested_device_id: str) -> str:
         device_id = safe_device_id(requested_device_id)
         if is_placeholder_device_id(device_id):
-            latest = latest_seen_device_id(self.server.last_seen)
-            if latest:
-                return latest
+            first_connected = first_connected_device_id(self.server.last_seen, self.server.device_order)
+            if first_connected:
+                return first_connected
         return device_id
 
     def _queue_for(self, device_id: str) -> Queue:
@@ -539,12 +750,77 @@ class Handler(BaseHTTPRequestHandler):
 
     def _enqueue_command(self, device_id: str, command: dict) -> None:
         device_id = safe_device_id(device_id)
-        self.server.last_seen.setdefault(device_id, time.time())
         self._queue_for(device_id).put(command)
         detail = ""
         if command.get("type") == "face" and isinstance(command.get("payload"), dict):
             detail = f" expression={command['payload'].get('expression', '')}"
         print(f"Command queued: device={device_id} cmd_id={command['cmd_id']} type={command['type']}{detail}", flush=True)
+
+    def _mark_device_seen(self, device_id: str) -> None:
+        device_id = safe_device_id(device_id)
+        if device_id not in self.server.device_order:
+            self.server.device_order.append(device_id)
+        self.server.last_seen[device_id] = time.time()
+
+    def _handle_event_audio(self, filename: str):
+        audio_ext = "wav" if filename.endswith(".wav") else "pcm"
+        name = filename.rsplit(".", 1)[0] if "." in filename else filename
+        if name not in HEAD_TOUCH_EVENT_TEXT:
+            self._send_json(
+                {
+                    "type": "error",
+                    "message": f"unknown head touch event: {name}",
+                    "events": list(HEAD_TOUCH_EVENT_TEXT),
+                },
+                HTTPStatus.NOT_FOUND,
+            )
+            return
+
+        cache_dir = os.path.join(self.server.static_dir, "event-audio")
+        os.makedirs(cache_dir, exist_ok=True)
+        pcm_path = os.path.join(cache_dir, f"{name}.pcm")
+        wav_path = os.path.join(cache_dir, f"{name}.wav")
+        if not os.path.exists(pcm_path) or os.path.getsize(pcm_path) == 0:
+            text = HEAD_TOUCH_EVENT_TEXT[name]
+            print(f"Event audio cache miss: {name} -> {text!r}", flush=True)
+            try:
+                audio = self._aliyun_tts_pcm_with_retries(text)
+            except Exception as exc:
+                print(f"Event audio TTS failed: {exc}", file=sys.stderr, flush=True)
+                self._send_json({"type": "error", "message": str(exc)}, HTTPStatus.BAD_GATEWAY)
+                return
+            tmp_path = f"{pcm_path}.tmp"
+            with open(tmp_path, "wb") as fp:
+                fp.write(audio)
+            os.replace(tmp_path, pcm_path)
+            print(f"Event audio cached: {pcm_path} bytes={len(audio)}", flush=True)
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
+            pcm = read_binary_file(pcm_path)
+            tmp_path = f"{wav_path}.tmp"
+            with open(tmp_path, "wb") as fp:
+                fp.write(pcm_to_wav(pcm, self.server.sample_rate))
+            os.replace(tmp_path, wav_path)
+
+        path = wav_path if audio_ext == "wav" else pcm_path
+
+        try:
+            stat = os.stat(path)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "audio/wav" if audio_ext == "wav" else "application/octet-stream")
+            self.send_header("Content-Length", str(stat.st_size))
+            self.send_header("X-Audio-Format", "wav" if audio_ext == "wav" else "pcm_s16le")
+            self.send_header("X-Sample-Rate", str(self.server.sample_rate))
+            self.send_header("X-Channels", "1")
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            with open(path, "rb") as fp:
+                while True:
+                    chunk = fp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            print(f"Event audio client disconnected: {name}", flush=True)
 
     def _handle_upload_image(self, body: bytes):
         if not body:
@@ -852,14 +1128,23 @@ def is_placeholder_device_id(device_id: str) -> bool:
 def normalize_expression_name(expression: str) -> str:
     value = str(expression or "").strip()
     if not value:
-        return "happy"
+        return "calm"
     return EXPRESSION_ALIASES.get(value, value)
 
 
-def latest_seen_device_id(last_seen: dict[str, float]) -> str:
+def first_connected_device_id(
+    last_seen: dict[str, float],
+    device_order: list[str],
+    now: float | None = None,
+) -> str:
     if not last_seen:
         return "default"
-    return max(last_seen.items(), key=lambda item: item[1])[0]
+    now = time.time() if now is None else now
+    for device_id in device_order:
+        seen = last_seen.get(device_id)
+        if seen is not None and now - seen <= DEVICE_ONLINE_TTL_SECONDS:
+            return device_id
+    return "default"
 
 
 def make_command(command_type: str, payload, priority: int = 0, interrupt: bool = False) -> dict:
@@ -875,7 +1160,7 @@ def make_command(command_type: str, payload, priority: int = 0, interrupt: bool 
 
 def command_payload_from_query(command_type: str, query: dict):
     if command_type in ("face", "expression", "action"):
-        expression = first_value(query, "expression") or first_value(query, "face") or "happy"
+        expression = first_value(query, "expression") or first_value(query, "face") or "calm"
         if command_type in ("expression", "action"):
             expression = first_value(query, "name") or first_value(query, "action") or expression
         return {"expression": normalize_expression_name(expression)}
@@ -908,7 +1193,7 @@ def command_payload_from_query(command_type: str, query: dict):
             except json.JSONDecodeError:
                 pass
         text = first_value(query, "text")
-        expression = normalize_expression_name(first_value(query, "expression") or "happy")
+        expression = normalize_expression_name(first_value(query, "expression") or "calm")
         steps = [{"type": "face", "expression": expression}]
         if text:
             steps.append({"type": "speak", "text": text})
@@ -1041,6 +1326,7 @@ def main():
     parser.add_argument("--tts-request-timeout", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_TTS_REQUEST_TIMEOUT", "12")))
     parser.add_argument("--tts-retries", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_TTS_RETRIES", "2")))
     parser.add_argument("--capture-dir", default=os.environ.get("STACKCHAN_CAPTURE_DIR", "captures"))
+    parser.add_argument("--static-dir", default=os.environ.get("STACKCHAN_STATIC_DIR", "static"))
     args = parser.parse_args()
 
     httpd = AliyunVoiceServer((args.host, args.port), Handler)
@@ -1070,14 +1356,17 @@ def main():
     httpd.tts_request_timeout = args.tts_request_timeout
     httpd.tts_retries = args.tts_retries
     httpd.capture_dir = args.capture_dir
+    httpd.static_dir = args.static_dir
     httpd.device_queues = {}
     httpd.last_ack = {}
     httpd.last_seen = {}
+    httpd.device_order = []
 
     print("Stack-chan Aliyun voice bridge")
     print(f"  health: http://127.0.0.1:{args.port}/health")
     print(f"  ASR:    http://{args.host}:{args.port}/upload")
     print(f"  TTS:    http://{args.host}:{args.port}/stream-speak?text=...")
+    print(f"  Events: http://{args.host}:{args.port}/event-audio/press.pcm -> {args.static_dir}/event-audio")
     print(f"  Image:  http://{args.host}:{args.port}/upload-image -> {args.capture_dir}")
     print(f"  Command push via HTTP long poll:")
     print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")

@@ -48,7 +48,7 @@ Returns service status and endpoint metadata.
 
 `GET /devices`
 
-Lists devices that have checked in through the HTTP command channel:
+Lists devices that have checked in through the HTTP command channel. `default_device_id` is the first currently online device used by command endpoints when `device_id` is omitted:
 
 ```bash
 curl 'http://127.0.0.1:8091/devices'
@@ -62,36 +62,33 @@ Device long-poll endpoint. Stack-chan keeps one blocking HTTP request open and r
 
 Device ACK endpoint.
 
-`GET /command/<type>?device_id=...`
+`GET /command/<type>`
 
-Queues a command for a device. These GET shortcuts are intended for manual testing from a browser or curl:
+Queues a command for the first currently online device. Pass `device_id` only when you need to target a specific device. These GET shortcuts are intended for manual testing from a browser or curl:
 
 ```bash
 curl -G 'http://127.0.0.1:8091/command/face' \
-  --data-urlencode 'device_id=stackchan-001' \
-  --data-urlencode 'expression=happy'
+  --data-urlencode 'expression=happy_squint'
 
-curl -G 'http://127.0.0.1:8091/expression/shy' \
-  --data-urlencode 'device_id=stackchan-001'
+curl -G 'http://127.0.0.1:8091/expression/shy'
 
-curl -G 'http://127.0.0.1:8091/action/blink' \
-  --data-urlencode 'device_id=stackchan-001'
+curl -G 'http://127.0.0.1:8091/action/blink'
 
-curl -G 'http://127.0.0.1:8091/action/nod' \
-  --data-urlencode 'device_id=stackchan-001'
+curl -G 'http://127.0.0.1:8091/action/heart_action'
+
+curl -G 'http://127.0.0.1:8091/action/wink'
+
+curl -G 'http://127.0.0.1:8091/action/nod'
 
 curl -G 'http://127.0.0.1:8091/command/speak' \
-  --data-urlencode 'device_id=stackchan-001' \
   --data-urlencode 'text=早上好，我已经收到你的问题啦。'
 
 curl -G 'http://127.0.0.1:8091/command/motion' \
-  --data-urlencode 'device_id=stackchan-001' \
   --data-urlencode 'pan=15' \
   --data-urlencode 'tilt=45' \
   --data-urlencode 'duration_ms=500'
 
 curl -G 'http://127.0.0.1:8091/command/sequence' \
-  --data-urlencode 'device_id=stackchan-001' \
   --data-urlencode 'expression=thinking' \
   --data-urlencode 'text=让我想一下这个问题。'
 ```
@@ -102,7 +99,6 @@ Queues the full command schema as JSON:
 
 ```json
 {
-  "device_id": "stackchan-001",
   "type": "sequence",
   "payload": [
     {"type": "face", "expression": "thinking"},
@@ -116,7 +112,7 @@ Queues the full command schema as JSON:
 
 Audio upload endpoint for speech recognition. The body can be WAV or raw PCM. WAV sample rate is detected from the header; raw PCM defaults to `STACKCHAN_ALIYUN_SAMPLE_RATE` or `16000`.
 
-After recognition, motion phrases such as `左转15度`, `向右转二十度`, `抬头10度`, and `低头五度` are queued as Stack-chan motion commands instead of being spoken back. Other recognized text is still repeated as TTS.
+After recognition, custom speak commands such as `讲个笑话` are queued as Stack-chan speech commands. Motion phrases such as `左转15度`, `向右转二十度`, `抬头10度`, `低头五度`, and `请回正` are queued as Stack-chan motion commands instead of being spoken back. Face phrases such as `切换到平静表情`, `开心`, `说话动作`, `害羞表情`, `眯眼笑`, `爱心`, `眨眼`, and `思考` are queued as face commands. Other recognized text is still repeated as TTS.
 
 `POST /upload-audio`
 
@@ -125,7 +121,7 @@ Alias for `/upload`. The firmware uses this route in background listening mode.
 Response:
 
 ```json
-{"type": "stt", "text": "...", "task_id": "...", "handled_as": "motion|repeat"}
+{"type": "stt", "text": "...", "task_id": "...", "handled_as": "motion|face|repeat"}
 ```
 
 `GET /stream-speak?text=...`
@@ -137,6 +133,23 @@ Aliyun TTS endpoint. Text is split by sentence, synthesized with retries, and re
 - format: `pcm_s16le`
 - sample rate: default `16000`
 - channels: `1`
+
+`GET /head-touch-events`
+
+Lists the head touch event names and their cached audio URLs.
+
+`GET /event-audio/<event>.pcm`
+
+Returns cached static audio for head touch events. On the first request for an event, the server synthesizes the text with Aliyun TTS and saves it under `static/event-audio/`; later requests serve the cached file directly. Use `.pcm` for the firmware's raw `pcm_s16le` playback, and `.wav` for normal desktop/browser listening.
+
+Supported events:
+
+| Event | Spoken text |
+| --- | --- |
+| `press` | `按压` |
+| `click` | `点击` |
+| `swipe_forward` | `前滑` |
+| `swipe_backward` | `后滑` |
 
 `POST /upload-image`
 
@@ -184,6 +197,7 @@ Environment variables:
 | `STACKCHAN_ALIYUN_TTS_REQUEST_TIMEOUT` | `12` | Per-request TTS timeout in seconds |
 | `STACKCHAN_ALIYUN_TTS_RETRIES` | `2` | TTS retry count |
 | `STACKCHAN_CAPTURE_DIR` | `captures` | Directory for image uploads |
+| `STACKCHAN_STATIC_DIR` | `static` | Directory for cached static assets such as head-touch event audio |
 
 ## Firmware URLs
 

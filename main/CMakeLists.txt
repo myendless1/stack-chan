@@ -3,7 +3,6 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES esp_wifi esp_http_client esp_netif esp_event nvs_flash json app_update mbedtls tcp_transport esp_audio_codec esp32-camera esp_driver_uart
     EMBED_FILES
-        "happy_face.png"
         "calm_face.png"
         "speak1_face.png"
         "speak2_face.png"
@@ -11,6 +10,10 @@ idf_component_register(
         "thinking_face.png"
         "blink_half_face.png"
         "blink_closed_face.png"
+        "wink_half_face.png"
+        "wink_closed_face.png"
+        "heart_small_face.png"
+        "heart_face.png"
         "nod_soft_face.png"
         "nod_down_face.png"
         "happy_squint_face.png"
