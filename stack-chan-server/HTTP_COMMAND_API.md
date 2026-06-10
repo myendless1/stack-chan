@@ -343,6 +343,40 @@ Response:
 }
 ```
 
+## Device Events
+
+Xiaopai can report non-speech events to the server:
+
+```http
+GET /device/event?device_id=<device_id>&type=head_touch&name=click
+POST /device/event
+Content-Type: application/json
+```
+
+```json
+{
+  "device_id": "44:1b:f6:e4:83:8c",
+  "type": "head_touch",
+  "name": "click"
+}
+```
+
+When OpenClaw is configured, the server sends the event with the Xiaopai output contract as the system prompt. OpenClaw should reply with ordered tags:
+
+```text
+<action>thinking</action><speak>我在。</speak><action>happy_squint</action>
+```
+
+Supported `<action>` values include:
+
+```text
+calm, shy, thinking, happy_squint, happy_squint_soft, heart, heart_small
+blink, wink, heart_action, nod, speak, happy_dynamic
+move:left:15, move:right:15, move:up:10, move:down:10, move:center
+```
+
+The response includes `queued_commands`; Xiaopai uses its existing `/device/next-command` long-poll loop to execute those commands.
+
 ## Audio Upload
 
 The firmware uploads detected speech here:
@@ -354,6 +388,8 @@ X-Device-Id: <device_id>
 ```
 
 `/upload-audio` is an alias of `/upload`.
+
+If OpenClaw is configured with `OPENCLAW_BASE_URL` and `OPENCLAW_GATEWAY_TOKEN`, non-empty ASR text is sent to OpenClaw before the local demo command rules. The server asks OpenClaw to return only `<speak>...</speak>` and `<action>...</action>` tags, then converts those tags to Xiaopai commands. If OpenClaw is unavailable or returns no executable tags, the local rules below still apply.
 
 Response:
 

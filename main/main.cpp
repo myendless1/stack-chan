@@ -4337,12 +4337,49 @@ static void play_head_touch_event_audio(HeadTouchEvent event)
     voice_listener_paused = false;
 }
 
+static bool report_head_touch_event_to_server(HeadTouchEvent event)
+{
+    std::string url = make_server_url("/device/event");
+    url += "?device_id=";
+    url += url_encode(mac_address().c_str());
+    url += "&type=head_touch&name=";
+    url += url_encode(head_touch_event_name(event));
+
+    std::string response;
+    if (!http_get_string(url, &response, 12000) || response.empty()) {
+        ESP_LOGW(TAG, "Head touch event report failed: %s", head_touch_event_name(event));
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "Head touch event response is not JSON: %s", response.c_str());
+        return false;
+    }
+
+    bool queued = false;
+    const cJSON* queued_commands = cJSON_GetObjectItemCaseSensitive(root, "queued_commands");
+    if (cJSON_IsArray(queued_commands) && cJSON_GetArraySize(queued_commands) > 0) {
+        queued = true;
+    }
+    std::string error = json_string_value(root, "openclaw_error");
+    if (!error.empty()) {
+        ESP_LOGW(TAG, "Head touch OpenClaw error: %s", error.c_str());
+    }
+    cJSON_Delete(root);
+
+    ESP_LOGI(TAG, "Head touch event reported: %s queued=%d", head_touch_event_name(event), queued ? 1 : 0);
+    return queued;
+}
+
 static void run_head_touch_audio_loop()
 {
     while (true) {
         HeadTouchEvent event = HeadTouchEvent::Press;
         if (xQueueReceive(head_touch_event_queue, &event, portMAX_DELAY) == pdTRUE) {
-            play_head_touch_event_audio(event);
+            if (!report_head_touch_event_to_server(event)) {
+                play_head_touch_event_audio(event);
+            }
         }
     }
 }
