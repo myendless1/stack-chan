@@ -44,6 +44,7 @@ void run_wifi_connect_app();
 void run_camera_upload_app();
 void run_tracking_user_demo();
 static bool wifi_is_connected();
+static void show_expression(const char* expression);
 
 extern const uint8_t calm_face_png_start[] asm("_binary_calm_face_png_start");
 extern const uint8_t calm_face_png_end[] asm("_binary_calm_face_png_end");
@@ -163,7 +164,7 @@ static constexpr uint32_t kHeadTouchClickMaxMs = 650;
 static constexpr int16_t kHeadTouchSwipeThreshold = 40;
 static constexpr uint32_t kHeadTouchTaskStackBytes = 6 * 1024;
 static constexpr uint32_t kHeadTouchAudioTaskStackBytes = 16 * 1024;
-static constexpr uint32_t kSpeakerDrainMs = 180;
+static constexpr uint32_t kSpeakerDrainMs = 500;
 
 static void configure_speaker_for_tts()
 {
@@ -490,26 +491,29 @@ void draw_wifi_setup_steps(const char* ap_ssid)
     display.fillScreen(TFT_BLACK);
     display.setTextDatum(top_left);
 
-    display.setFont(&fonts::FreeSansBoldOblique24pt7b);
+    display.setFont(&fonts::Font4);
     display.setTextSize(1);
     display.setTextColor(TFT_CYAN, TFT_BLACK);
-    display.drawString("WiFi Setup", 18, 22);
+    display.drawString("Setup", 18, 18);
 
-    display.setFont(&fonts::Font4);
+    display.setFont(&fonts::Font2);
     display.setTextColor(TFT_WHITE, TFT_BLACK);
-    display.drawString("1. Connect WiFi", 18, 92);
+    display.drawString("1. Connect to AP", 18, 58);
     display.setTextColor(TFT_GREEN, TFT_BLACK);
-    display.drawString(ap_ssid ? ap_ssid : "", 38, 122);
-
-    display.setTextColor(TFT_WHITE, TFT_BLACK);
-    display.drawString("Password", 38, 152);
-    display.setTextColor(TFT_GREEN, TFT_BLACK);
-    display.drawString(kProvisioningApPassword, 138, 152);
+    display.drawString(ap_ssid ? ap_ssid : "", 38, 84);
 
     display.setTextColor(TFT_WHITE, TFT_BLACK);
-    display.drawString("2. Open", 18, 188);
+    display.drawString("Passwd", 38, 112);
     display.setTextColor(TFT_GREEN, TFT_BLACK);
-    display.drawString("http://192.168.4.1", 38, 218);
+    display.drawString(kProvisioningApPassword, 104, 112);
+
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.drawString("2. Open Browser", 18, 150);
+    display.setTextColor(TFT_GREEN, TFT_BLACK);
+    display.drawString("192.168.4.1", 38, 176);
+
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.drawString("3. Select WiFi & Server", 18, 214);
 }
 
 void draw_app1_status()
@@ -705,7 +709,6 @@ void set_current_network_status(const char* stage, const char* line1, const char
 
 void start_wifi_connect_task()
 {
-    set_wifi_status("Starting", "Connecting WiFi");
     if (wifi_task_handle == nullptr) {
         xTaskCreatePinnedToCore([](void*) {
             ::run_wifi_connect_app();
@@ -713,7 +716,7 @@ void start_wifi_connect_task()
             vTaskDelete(nullptr);
         }, "app0_wifi", kWifiTaskStackBytes, nullptr, 3, &wifi_task_handle, 1);
     } else {
-        set_wifi_status("Running", "WiFi task is already running");
+        ESP_LOGI(TAG, "WiFi setup task is already running");
     }
 }
 
@@ -805,11 +808,7 @@ void enter_app(AppId app)
     }
 
     if (app == AppId::WifiConnect) {
-        if (wifi_is_connected()) {
-            set_wifi_status("Connected", active_wifi_ssid.c_str(), "WiFi SSID connected", "", false, true);
-        } else {
-            start_wifi_connect_task();
-        }
+        start_wifi_connect_task();
         return;
     }
 
@@ -1411,19 +1410,20 @@ static bool select_server_base(const std::string& requested_base, bool persist)
 {
     std::string base = normalize_server_base(requested_base);
     if (!base.empty()) {
-        set_current_network_status("Server", "Testing server", base.c_str());
+        ESP_LOGI(TAG, "Testing server base: %s", base.c_str());
         if (http_health_ok(base)) {
             active_server_base = base;
             active_server_selected = true;
             if (persist) {
                 save_server_base(base);
             }
-            set_current_network_status("Server OK", active_server_base.c_str(), "Using this endpoint", "", false, true);
+            ESP_LOGI(TAG, "Server selected: %s", active_server_base.c_str());
+            show_expression("calm");
             return true;
         }
 
         active_server_selected = false;
-        set_current_network_status("Server 404", "Server health failed", base.c_str(), "", false, false);
+        ESP_LOGW(TAG, "Server health failed: %s", base.c_str());
         return false;
     }
 
@@ -1473,7 +1473,7 @@ static bool connect_wifi_credentials(const std::string& ssid, const std::string&
         return false;
     }
 
-    set_current_network_status("WiFi", "Connecting...", ssid.c_str());
+    ESP_LOGI(TAG, "Connecting WiFi credentials: %s", ssid.c_str());
     xEventGroupClearBits(wifi_event_group, kWifiConnectedBit | kWifiFailedBit);
     wifi_retry_count = 0;
     wifi_connect_requested = true;
@@ -1503,12 +1503,11 @@ static bool connect_wifi_credentials(const std::string& ssid, const std::string&
         if (persist) {
             save_wifi_credentials(ssid, password);
         }
-        set_current_network_status("WiFi OK", "Connected", active_wifi_ssid.c_str(), "", false, true);
+        ESP_LOGI(TAG, "WiFi connected: %s", active_wifi_ssid.c_str());
         return true;
     }
 
     wifi_connect_requested = false;
-    set_current_network_status("WiFi Fail", "Could not connect", "Check SSID/password", "", false, false);
     ESP_LOGW(TAG, "WiFi connect failed: %s", ssid.c_str());
     return false;
 }
@@ -1945,12 +1944,11 @@ static bool ensure_wifi_connected(bool allow_connect, bool force_candidate_scan 
     ensure_wifi_stack_started();
 
     if (!force_candidate_scan && wifi_is_connected()) {
-        set_current_network_status("WiFi OK", "Already connected", active_wifi_ssid.c_str(), "", false, true);
+        ESP_LOGI(TAG, "WiFi already connected: %s", active_wifi_ssid.c_str());
         return true;
     }
 
     if (!allow_connect) {
-        set_current_network_status("Need WiFi", "Open WiFi Connect", active_wifi_ssid.c_str(), "", false, false);
         ESP_LOGW(TAG, "WiFi is not connected; network app will not reconnect automatically");
         return false;
     }
@@ -1967,7 +1965,7 @@ static bool ensure_wifi_connected(bool allow_connect, bool force_candidate_scan 
         if (candidate.ssid == nullptr || strlen(candidate.ssid) == 0) {
             continue;
         }
-        set_current_network_status("WiFi", "Connecting...", candidate.ssid);
+        ESP_LOGI(TAG, "Trying WiFi candidate: %s", candidate.ssid);
         xEventGroupClearBits(wifi_event_group, kWifiConnectedBit | kWifiFailedBit);
         wifi_retry_count = 0;
         if (wifi_started) {
@@ -1995,14 +1993,13 @@ static bool ensure_wifi_connected(bool allow_connect, bool force_candidate_scan 
             active_wifi_ssid = candidate.ssid;
             active_wifi_candidate_index = candidate_index;
             active_server_selected = false;
-            set_current_network_status("WiFi OK", "Connected", active_wifi_ssid.c_str());
+            ESP_LOGI(TAG, "WiFi candidate connected: %s", active_wifi_ssid.c_str());
             return true;
         }
         wifi_connect_requested = false;
         ESP_LOGW(TAG, "WiFi candidate failed: %s", candidate.ssid);
     }
 
-    set_current_network_status("WiFi Fail", "Could not connect", "Check SSID/password", "", false, false);
     ESP_LOGE(TAG, "WiFi connection failed or timed out");
     active_wifi_candidate_index = -1;
     return false;
@@ -2018,11 +2015,10 @@ void run_wifi_connect_app()
     ensure_client_id();
     if (start_provisioning_portal()) {
         if (wifi_is_connected()) {
-            set_wifi_status("Connected", active_wifi_ssid.c_str(), "Portal remains open", "http://192.168.4.1",
-                            false, true);
+            ESP_LOGI(TAG, "Provisioning portal remains open, WiFi already connected: %s", active_wifi_ssid.c_str());
         }
     } else {
-        set_wifi_status("WiFi Setup", "Could not start portal", "", "", false, false);
+        set_wifi_status("Setup", "Could not start portal", "", "", false, false);
     }
 }
 
@@ -2064,14 +2060,14 @@ static bool ensure_server_selected()
     }
 
     active_server_selected = false;
-    set_current_network_status("Server 404", "Use portal to set server", "http://192.168.4.1", "", false, false);
+    ESP_LOGW(TAG, "Server is not selected or health check failed");
     return false;
 }
 
 static bool ensure_network_ready()
 {
     if (!start_provisioning_portal()) {
-        set_current_network_status("WiFi Setup", "Could not start portal", "", "", false, false);
+        set_current_network_status("Setup", "Could not start portal", "", "", false, false);
         return false;
     }
 
@@ -3699,6 +3695,16 @@ static bool play_stream_pcm_chunk(const int16_t* samples, size_t sample_count)
     return true;
 }
 
+static void drain_speaker_playback()
+{
+    while (M5.Speaker.isPlaying() && !app2_stop_requested) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!app2_stop_requested) {
+        vTaskDelay(pdMS_TO_TICKS(kSpeakerDrainMs));
+    }
+}
+
 static bool stream_pcm_url(const std::string& url, const char* label, bool update_tts_status)
 {
     ESP_LOGI(TAG, "Stream PCM URL: %s", url.c_str());
@@ -3821,9 +3827,7 @@ static bool stream_pcm_url(const std::string& url, const char* label, bool updat
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
-    while (M5.Speaker.isPlaying() && !app2_stop_requested) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
+    drain_speaker_playback();
     M5.Speaker.stop();
 
     if (app2_stop_requested) {
@@ -4611,7 +4615,7 @@ static void start_background_services()
     xTaskCreatePinnedToCore([](void*) {
         ensure_client_id();
         while (!ensure_network_ready()) {
-            set_app1_status("Retrying", "WiFi or server not ready", "Will retry in 3 seconds", "", true, false);
+            ESP_LOGW(TAG, "WiFi or server not ready, retrying in 3 seconds");
             vTaskDelay(pdMS_TO_TICKS(3000));
         }
 
