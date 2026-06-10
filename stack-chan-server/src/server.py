@@ -424,6 +424,7 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     tts_prefetch_workers: int
     tts_request_timeout: int
     tts_retries: int
+    tts_tail_silence_ms: int
     capture_dir: str
     static_dir: str
     openclaw_base_url: str
@@ -660,6 +661,9 @@ class Handler(BaseHTTPRequestHandler):
                     response["handled_as"] = "repeat"
                 self._enqueue_command(device_id, command)
                 response["queued_command"] = command["cmd_id"]
+        else:
+            response["handled_as"] = "empty"
+            print(f"ASR empty, skip OpenClaw: device={device_id}", flush=True)
         self._send_json(response)
 
     def _handle_device_event(self, query: dict, posted: dict | None = None):
@@ -678,6 +682,21 @@ class Handler(BaseHTTPRequestHandler):
             details["name"] = name
         if text:
             details["text"] = text
+
+        if str(event_type) == "speech_recognition" and not str(details.get("text") or "").strip():
+            self._send_json(
+                {
+                    "type": "event",
+                    "device_id": device_id,
+                    "event_type": event_type,
+                    "name": name,
+                    "openclaw_enabled": self._openclaw_enabled(),
+                    "openclaw_skipped": "empty_speech_recognition",
+                    "queued_commands": [],
+                }
+            )
+            print(f"Speech event empty, skip OpenClaw: device={device_id}", flush=True)
+            return
 
         result = self._handle_openclaw_event(device_id, str(event_type), details, priority=1, interrupt=False)
         body = {
@@ -1110,6 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         first_ready_ms = (time.perf_counter() - stream_started) * 1000
+        tail_silence = self._tts_tail_silence()
         print(f"TTS stream: {len(parts)} sentence(s), first_ready_ms={first_ready_ms:.0f}, text={text!r}", flush=True)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/octet-stream")
@@ -1117,7 +1137,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Sample-Rate", str(self.server.sample_rate))
         self.send_header("X-Channels", "1")
         if len(parts) == 1:
-            self.send_header("Content-Length", str(len(first_audio)))
+            self.send_header("Content-Length", str(len(first_audio) + len(tail_silence)))
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
@@ -1131,6 +1151,10 @@ class Handler(BaseHTTPRequestHandler):
 
             remaining = parts[1:]
             if not remaining:
+                if tail_silence:
+                    self.wfile.write(tail_silence)
+                    self.wfile.flush()
+                    sent_bytes += len(tail_silence)
                 total_ms = (time.perf_counter() - stream_started) * 1000
                 print(f"TTS stream done: bytes={sent_bytes} total_ms={total_ms:.0f}", flush=True)
                 return
@@ -1149,6 +1173,10 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(audio)
                         self.wfile.flush()
                         sent_bytes += len(audio)
+            if tail_silence:
+                self.wfile.write(tail_silence)
+                self.wfile.flush()
+                sent_bytes += len(tail_silence)
             total_ms = (time.perf_counter() - stream_started) * 1000
             print(f"TTS stream done: bytes={sent_bytes} total_ms={total_ms:.0f}", flush=True)
         except (BrokenPipeError, ConnectionResetError):
@@ -1167,6 +1195,11 @@ class Handler(BaseHTTPRequestHandler):
                 last_error = exc
                 print(f"TTS attempt {attempt} failed for {text!r}: {exc}", file=sys.stderr, flush=True)
         raise RuntimeError(f"Aliyun TTS failed after {self.server.tts_retries + 1} attempt(s): {last_error}")
+
+    def _tts_tail_silence(self) -> bytes:
+        ms = max(0, int(self.server.tts_tail_silence_ms))
+        samples = self.server.sample_rate * ms // 1000
+        return b"\x00\x00" * samples
 
     def _aliyun_tts_pcm(self, text: str) -> bytes:
         started = time.perf_counter()
@@ -1688,6 +1721,7 @@ def main():
     parser.add_argument("--tts-prefetch-workers", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_TTS_PREFETCH_WORKERS", "2")))
     parser.add_argument("--tts-request-timeout", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_TTS_REQUEST_TIMEOUT", "12")))
     parser.add_argument("--tts-retries", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_TTS_RETRIES", "2")))
+    parser.add_argument("--tts-tail-silence-ms", type=int, default=int(os.environ.get("STACKCHAN_TTS_TAIL_SILENCE_MS", "350")))
     parser.add_argument("--capture-dir", default=os.environ.get("STACKCHAN_CAPTURE_DIR", "captures"))
     parser.add_argument("--static-dir", default=os.environ.get("STACKCHAN_STATIC_DIR", "static"))
     parser.add_argument("--openclaw-base-url", default=optional_env("STACKCHAN_OPENCLAW_BASE_URL", "OPENCLAW_BASE_URL"))
@@ -1729,6 +1763,7 @@ def main():
     httpd.tts_prefetch_workers = args.tts_prefetch_workers
     httpd.tts_request_timeout = args.tts_request_timeout
     httpd.tts_retries = args.tts_retries
+    httpd.tts_tail_silence_ms = args.tts_tail_silence_ms
     httpd.capture_dir = args.capture_dir
     httpd.static_dir = args.static_dir
     httpd.openclaw_base_url = args.openclaw_base_url
@@ -1750,6 +1785,7 @@ def main():
     print(f"  Events: http://{args.host}:{args.port}/head-touch-events -> {args.static_dir}/event-audio")
     print(f"  Image:  http://{args.host}:{args.port}/upload-image -> {args.capture_dir}")
     print(f"  OpenClaw: {'enabled' if httpd.openclaw_base_url and httpd.openclaw_token else 'disabled'} {httpd.openclaw_base_url or ''}")
+    print(f"  TTS tail silence: {args.tts_tail_silence_ms}ms")
     print(f"  Command push via HTTP long poll:")
     print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")
     print(f"          send:   GET http://{args.host}:{args.port}/command/speak?device_id=...&text=...")
