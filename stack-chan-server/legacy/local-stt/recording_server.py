@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
-    server_version = "StackChanRecordingServer/1.0"
+    server_version = "XiaopaiRecordingServer/1.0"
 
     def do_GET(self):
         if self.path not in ("/", "/health"):

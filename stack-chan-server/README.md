@@ -1,13 +1,13 @@
-# Stack-chan Server
+# Xiaopai Server
 
-Local bridge server for the Stack-chan firmware in this repository. It keeps cloud credentials on the computer and exposes simple HTTP endpoints for the ESP32 device.
+Local bridge server for the Xiaopai firmware in this repository. It keeps cloud credentials on the computer and exposes simple HTTP endpoints for the ESP32 device.
 
 ## Features
 
 - Aliyun NLS speech-to-text upload for recorded WAV/PCM audio.
 - Aliyun NLS text-to-speech as streaming `pcm_s16le` audio.
-- Camera upload receiver for Stack-chan RGB565 frames.
-- RGB565 conversion to PNG and BMP. The Stack-chan camera data is decoded as big-endian RGB565.
+- Camera upload receiver for Xiaopai RGB565 frames.
+- RGB565 conversion to PNG and BMP. The Xiaopai camera data is decoded as big-endian RGB565.
 - Face detection visualization using `ageitgey/face_recognition`: detected face boxes and landmarks are saved as `*.faces.png`.
 - Legacy local open-source STT/TTS utilities are kept under `legacy/`.
 
@@ -56,7 +56,7 @@ curl 'http://127.0.0.1:8091/devices'
 
 `GET /device/next-command?device_id=...&timeout=25`
 
-Device long-poll endpoint. Stack-chan keeps one blocking HTTP request open and receives a JSON command when the server has one queued. A timeout returns `{"type":"noop"}`.
+Device long-poll endpoint. Xiaopai keeps one blocking HTTP request open and receives a JSON command when the server has one queued. A timeout returns `{"type":"noop"}`.
 
 `GET /device/ack?device_id=...&cmd_id=...&status=received|done|failed`
 
@@ -112,7 +112,7 @@ Queues the full command schema as JSON:
 
 Audio upload endpoint for speech recognition. The body can be WAV or raw PCM. WAV sample rate is detected from the header; raw PCM defaults to `STACKCHAN_ALIYUN_SAMPLE_RATE` or `16000`.
 
-After recognition, custom speak commands such as `讲个笑话` are queued as Stack-chan speech commands. Motion phrases such as `左转15度`, `向右转二十度`, `抬头10度`, `低头五度`, and `请回正` are queued as Stack-chan motion commands instead of being spoken back. Face phrases such as `切换到平静表情`, `开心`, `说话动作`, `害羞表情`, `眯眼笑`, `爱心`, `眨眼`, and `思考` are queued as face commands. Other recognized text is still repeated as TTS.
+After recognition, custom speak commands such as `讲个笑话` are queued as Xiaopai speech commands. Motion phrases such as `左转15度`, `向右转二十度`, `抬头10度`, `低头五度`, and `请回正` are queued as Xiaopai motion commands instead of being spoken back. Face phrases such as `切换到平静表情`, `开心`, `说话动作`, `害羞表情`, `眯眼笑`, `爱心`, `眨眼`, and `思考` are queued as face commands. Other recognized text is still repeated as TTS.
 
 `POST /upload-audio`
 
@@ -153,7 +153,7 @@ Supported events:
 
 `POST /upload-image`
 
-Image upload endpoint. Stack-chan sends raw RGB565 bytes with:
+Image upload endpoint. Xiaopai sends raw RGB565 bytes with:
 
 ```text
 Content-Type: image/rgb565
@@ -201,7 +201,7 @@ Environment variables:
 
 ## Firmware URLs
 
-Set the Stack-chan firmware URLs to your computer's LAN IP:
+Set the Xiaopai firmware URLs to your computer's LAN IP:
 
 ```text
 CONFIG_STACKCHAN_RECORD_UPLOAD_URL = http://<lan-ip>:8091/upload
@@ -221,8 +221,8 @@ TTS:
 
 ```bash
 curl --noproxy 127.0.0.1,localhost \
-  'http://127.0.0.1:8091/stream-speak?text=你好，Stack-chan。' \
-  -o /tmp/stackchan.pcm
+  'http://127.0.0.1:8091/stream-speak?text=你好，Xiaopai。' \
+  -o /tmp/xiaopai.pcm
 ```
 
 RGB565 upload:

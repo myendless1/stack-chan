@@ -18,7 +18,7 @@ class PiperCliBackend:
         self.length_scale = length_scale
 
     def synthesize(self, text: str) -> bytes:
-        with tempfile.TemporaryDirectory(prefix="stackchan-piper-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="xiaopai-piper-") as tmp:
             out_path = Path(tmp) / "speech.wav"
             cmd = [
                 self.binary,
@@ -37,7 +37,7 @@ class PiperCliBackend:
 
 
 class LocalTTSHandler(BaseHTTPRequestHandler):
-    server_version = "StackChanLocalTTS/1.0"
+    server_version = "XiaopaiLocalTTS/1.0"
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -45,7 +45,7 @@ class LocalTTSHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "ok": True,
-                    "service": "stackchan-local-tts",
+                    "service": "xiaopai-local-tts",
                     "backend": "piper-cli",
                     "model": str(self.server.backend.model),
                     "speak": "/speak?text=...",
@@ -125,7 +125,7 @@ class LocalTTSHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Local Piper TTS WAV API for Stack-chan.")
+    parser = argparse.ArgumentParser(description="Local Piper TTS WAV API for Xiaopai.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--piper-binary", default="piper")

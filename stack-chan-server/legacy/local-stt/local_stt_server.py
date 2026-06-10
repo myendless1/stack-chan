@@ -83,7 +83,7 @@ class WhisperCppBackend:
         self.language = language
 
     def transcribe(self, audio_path: Path) -> str:
-        with tempfile.TemporaryDirectory(prefix="stackchan-whispercpp-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="xiaopai-whispercpp-") as tmp:
             out_base = Path(tmp) / "result"
             cmd = [
                 self.binary,
@@ -103,14 +103,14 @@ class WhisperCppBackend:
 
 
 class LocalSTTHandler(BaseHTTPRequestHandler):
-    server_version = "StackChanLocalSTT/1.0"
+    server_version = "XiaopaiLocalSTT/1.0"
 
     def do_GET(self):
         path = urlparse(self.path).path
         if path in ("/", "/health"):
             body = {
                 "ok": True,
-                "service": "stackchan-local-stt",
+                "service": "xiaopai-local-stt",
                 "backend": self.server.backend_name,
                 "model": self.server.model_name,
                 "upload": "/upload",
@@ -241,7 +241,7 @@ def build_backend(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Local open-source STT API for Stack-chan.")
+    parser = argparse.ArgumentParser(description="Local open-source STT API for Xiaopai.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--output", default="recordings")

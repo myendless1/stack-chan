@@ -26,7 +26,7 @@ fi
   --compute-type "$COMPUTE_TYPE"
 
 echo
-echo "Stack-chan local STT service"
+echo "Xiaopai local STT service"
 echo "  upload: http://$HOST:$PORT/upload"
 echo "  health: http://127.0.0.1:$PORT/health"
 echo "  model:  $MODEL"

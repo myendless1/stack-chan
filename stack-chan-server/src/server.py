@@ -72,9 +72,9 @@ AVAILABLE_ACTIONS = (
 
 HEAD_TOUCH_EVENT_TEXT = {
     "press": "按压",
-    "click": "点击",
-    "swipe_forward": "前滑",
-    "swipe_backward": "后滑",
+    "click": "你好，我是小派同学",
+    "swipe_forward": "你好，我是小派同学",
+    "swipe_backward": "你好，我是小派同学",
 }
 
 EXPRESSION_ALIASES = {
@@ -418,7 +418,7 @@ class AliyunVoiceServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "StackChanAliyunVoice/1.0"
+    server_version = "XiaopaiAliyunVoice/1.0"
 
     def do_GET(self):
         path, query = self._path_query()
@@ -426,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "ok": True,
-                    "service": "stackchan-aliyun-voice",
+                    "service": "xiaopai-aliyun-voice",
                     "asr": "/upload",
                     "tts": "/stream-speak?text=...",
                     "image": "/upload-image",
@@ -836,7 +836,7 @@ class Handler(BaseHTTPRequestHandler):
 
         os.makedirs(self.server.capture_dir, exist_ok=True)
         stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        base = os.path.join(self.server.capture_dir, f"stackchan-{safe_device}-{stamp}")
+        base = os.path.join(self.server.capture_dir, f"xiaopai-{safe_device}-{stamp}")
 
         raw_ext = "jpg" if content_type.startswith("image/jpeg") else (image_format or "bin")
         raw_path = f"{base}.{raw_ext}"
@@ -1310,7 +1310,7 @@ def detect_and_visualize_faces(image_path: str, output_path: str) -> tuple[str, 
 def main():
     load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
-    parser = argparse.ArgumentParser(description="Local Stack-chan bridge for Aliyun ASR and PCM streaming TTS.")
+    parser = argparse.ArgumentParser(description="Local Xiaopai bridge for Aliyun ASR and PCM streaming TTS.")
     parser.add_argument("--host", default=os.environ.get("STACKCHAN_ALIYUN_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_PORT", "8091")))
     parser.add_argument("--region", choices=sorted(ASR_URLS), default=os.environ.get("STACKCHAN_ALIYUN_REGION", "shanghai"))
@@ -1362,7 +1362,7 @@ def main():
     httpd.last_seen = {}
     httpd.device_order = []
 
-    print("Stack-chan Aliyun voice bridge")
+    print("Xiaopai Aliyun voice bridge")
     print(f"  health: http://127.0.0.1:{args.port}/health")
     print(f"  ASR:    http://{args.host}:{args.port}/upload")
     print(f"  TTS:    http://{args.host}:{args.port}/stream-speak?text=...")

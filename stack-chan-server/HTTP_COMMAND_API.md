@@ -1,6 +1,6 @@
-# Stack-chan HTTP Command API
+# Xiaopai HTTP Command API
 
-This server exposes local HTTP endpoints for Stack-chan voice upload, TTS playback, and command delivery.
+This server exposes local HTTP endpoints for Xiaopai voice upload, TTS playback, and command delivery.
 
 Default base URL:
 
@@ -68,7 +68,7 @@ All command shortcuts support `GET`, so they can be called from a browser.
 
 ### Speak
 
-Queues a TTS command. Stack-chan will pause listening, stream TTS audio from `/stream-speak`, play it, then resume listening.
+Queues a TTS command. Xiaopai will pause listening, stream TTS audio from `/stream-speak`, play it, then resume listening.
 
 ```http
 GET /command/speak?text=<text>
@@ -408,8 +408,8 @@ Manual test:
 
 ```bash
 curl -G 'http://127.0.0.1:8091/stream-speak' \
-  --data-urlencode 'text=你好，Stack-chan。' \
-  -o /tmp/stackchan.pcm
+  --data-urlencode 'text=你好，Xiaopai。' \
+  -o /tmp/xiaopai.pcm
 ```
 
 ## Image Upload

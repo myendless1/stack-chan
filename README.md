@@ -1,6 +1,6 @@
-# Stack-chan Firmware
+# Xiaopai Firmware
 
-ESP-IDF firmware for Stack-chan / M5Stack CoreS3.
+ESP-IDF firmware for Xiaopai / M5Stack CoreS3.
 
 The firmware side contains only the device application: WiFi connection, voice upload, Aliyun PCM streaming TTS playback, and camera upload.
 
@@ -41,7 +41,7 @@ CONFIG_STACKCHAN_STREAM_TTS_URL    = http://<lan-ip>:8091/stream-speak
 CONFIG_STACKCHAN_IMAGE_UPLOAD_URL  = http://<lan-ip>:8091/upload-image
 ```
 
-The Stack-chan server listens on port `8091` by default.
+The Xiaopai server listens on port `8091` by default.
 
 ## Project Layout
 

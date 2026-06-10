@@ -59,7 +59,7 @@ if { [ -z "${ALIYUN_NLS_TOKEN:-}" ] && { [ -z "${ALIYUN_AK_ID:-}" ] || [ -z "${A
 fi
 
 echo
-echo "Stack-chan Server"
+echo "Xiaopai Server"
 echo "  ASR upload:   http://$HOST:$PORT/upload"
 echo "  TTS stream:   http://$HOST:$PORT/stream-speak?text=..."
 echo "  Image upload: http://$HOST:$PORT/upload-image"

@@ -35,7 +35,7 @@ if [ ! -f "$CONFIG" ]; then
 fi
 
 echo
-echo "Stack-chan local TTS service"
+echo "Xiaopai local TTS service"
 echo "  speak:  http://$HOST:$PORT/speak?text=..."
 echo "  health: http://127.0.0.1:$PORT/health"
 echo "  model:  $MODEL"

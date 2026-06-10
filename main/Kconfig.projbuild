@@ -1,4 +1,4 @@
-menu "Stack-chan settings"
+menu "Xiaopai settings"
 
     config STACKCHAN_WIFI_SSID
         string "Wi-Fi SSID"
@@ -26,7 +26,7 @@ menu "Stack-chan settings"
 
     config STACKCHAN_TTS_TEXT
         string "TTS text"
-        default "Hello, I am Stack-chan"
+        default "Hello, I am Xiaopai"
 
     config STACKCHAN_TTS_VOLUME
         int "TTS volume"
