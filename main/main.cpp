@@ -1598,6 +1598,7 @@ static const char* provisioning_page_html()
 :root{color-scheme:dark}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#111820;color:#eef3f7}
 main{max-width:560px;margin:0 auto;padding:24px 16px 36px}
+main.done{min-height:100vh;display:grid;place-items:center;padding:0 20px;text-align:center;font-size:24px;font-weight:750;color:#36c98f}
 h1{font-size:25px;margin:6px 0 4px}
 .sub{color:#a8b6c2;font-size:14px;margin:0 0 18px}
 .panel{border:1px solid #2f3f4b;border-radius:8px;background:#17212b;padding:14px;margin:12px 0}
@@ -1648,14 +1649,16 @@ dialog::backdrop{background:rgba(0,0,0,.55)}
 </form>
 </dialog>
 <script>
-const list=document.getElementById('list'),serversEl=document.getElementById('servers'),statusEl=document.getElementById('status'),dlg=document.getElementById('dlg');
+const list=document.getElementById('list'),serversEl=document.getElementById('servers'),statusEl=document.getElementById('status'),dlg=document.getElementById('dlg'),customServer=document.getElementById('customServer');
 let selectedWifi=null,selectedServer='',savedServers=[];
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function normalizeServer(s){s=String(s||'').trim();if(!s)return'';if(!/^https?:\/\//i.test(s))s='http://'+s;return s.replace(/\/+$/,'');}
+function showReady(){document.body.innerHTML='<main class="done">可以与小派同学互动啦~</main>';}
 async function scan(){
   statusEl.textContent='正在扫描附近 WiFi...';
   const r=await fetch('/scan');
   const data=await r.json();
+  if(data.connected&&data.serverOk){showReady();return;}
   savedServers=data.servers||[];
   selectedServer=data.savedServer||savedServers[0]||'';
   customServer.value=selectedServer;
@@ -1713,7 +1716,7 @@ async function connectSelected(){
   const data=await r.json();
   if(!data.ok){alert('WiFi 连接失败，请重新输入 WiFi 密码。');openDialog(selectedWifi.ssid);statusEl.textContent='WiFi 连接失败';return;}
   if(!data.serverOk){alert('服务器连接失败，请重新输入 IP + 端口。');customServer.focus();statusEl.textContent='WiFi 已连接，但服务器不可用';return;}
-  statusEl.textContent='可以与小派同学互动啦';
+  showReady();
 }
 scan();
 </script>
@@ -1747,7 +1750,9 @@ static esp_err_t provisioning_scan_handler(httpd_req_t* req)
 
     std::string json = "{\"connected\":\"";
     json += wifi_is_connected() ? json_escape(active_wifi_ssid) : "";
-    json += "\",\"aps\":[";
+    json += "\",\"serverOk\":";
+    json += (wifi_is_connected() && active_server_selected) ? "true" : "false";
+    json += ",\"aps\":[";
     for (uint16_t i = 0; i < ap_count; ++i) {
         std::string ssid(reinterpret_cast<char*>(records[i].ssid));
         if (ssid.empty()) {
