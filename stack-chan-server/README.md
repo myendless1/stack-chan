@@ -140,16 +140,16 @@ Lists the head touch event names and their cached audio URLs.
 
 `GET /event-audio/<event>.pcm`
 
-Returns cached static audio for head touch events. On the first request for an event, the server synthesizes the text with Aliyun TTS and saves it under `static/event-audio/`; later requests serve the cached file directly. Use `.pcm` for the firmware's raw `pcm_s16le` playback, and `.wav` for normal desktop/browser listening.
+Returns cached static audio for head touch events. On the first request for an event, or whenever the configured event text changes, the server synthesizes the text with Aliyun TTS and saves it under `static/event-audio/`; later requests serve the cached file directly. Use `.pcm` for the firmware's raw `pcm_s16le` playback, and `.wav` for normal desktop/browser listening.
 
 Supported events:
 
 | Event | Spoken text |
 | --- | --- |
 | `press` | `按压` |
-| `click` | `点击` |
-| `swipe_forward` | `前滑` |
-| `swipe_backward` | `后滑` |
+| `click` | `你好，我是小派同学` |
+| `swipe_forward` | `你好，我是小派同学` |
+| `swipe_backward` | `你好，我是小派同学` |
 
 `POST /upload-image`
 

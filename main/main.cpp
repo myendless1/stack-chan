@@ -483,6 +483,35 @@ void draw_wifi_status()
     }
 }
 
+void draw_wifi_setup_steps(const char* ap_ssid)
+{
+    mark_expression_screen_dirty();
+    auto& display = M5.Display;
+    display.fillScreen(TFT_BLACK);
+    display.setTextDatum(top_left);
+
+    display.setFont(&fonts::FreeSansBoldOblique24pt7b);
+    display.setTextSize(1);
+    display.setTextColor(TFT_CYAN, TFT_BLACK);
+    display.drawString("WiFi Setup", 18, 22);
+
+    display.setFont(&fonts::Font4);
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.drawString("1. Connect WiFi", 18, 92);
+    display.setTextColor(TFT_GREEN, TFT_BLACK);
+    display.drawString(ap_ssid ? ap_ssid : "", 38, 122);
+
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.drawString("Password", 38, 152);
+    display.setTextColor(TFT_GREEN, TFT_BLACK);
+    display.drawString(kProvisioningApPassword, 138, 152);
+
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.drawString("2. Open", 18, 188);
+    display.setTextColor(TFT_GREEN, TFT_BLACK);
+    display.drawString("http://192.168.4.1", 38, 218);
+}
+
 void draw_app1_status()
 {
     auto& display = M5.Display;
@@ -1873,7 +1902,10 @@ static bool start_provisioning_portal()
     }
 
     provisioning_started = true;
-    set_app1_status("WiFi Setup", ap_ssid.c_str(), "Password: 12345678", "Open http://192.168.4.1", true, false);
+    {
+        M5Lock lock;
+        draw_wifi_setup_steps(ap_ssid.c_str());
+    }
     return true;
 }
 
@@ -4530,10 +4562,8 @@ static void run_command_http_loop()
 
 static void start_background_services()
 {
-    current_app = AppId::VoiceDemo;
+    current_app = AppId::WifiConnect;
     voice_status_screen_suppressed = false;
-    show_expression(kDefaultExpression);
-    set_app1_status("Booting", "Connecting WiFi", "Starting background services", "", true, false);
 
     if (boot_task_handle != nullptr) {
         return;
@@ -4547,6 +4577,7 @@ static void start_background_services()
         }
 
         show_expression(kDefaultExpression);
+        current_app = AppId::VoiceDemo;
         voice_status_screen_suppressed = true;
         start_head_touch_services();
 

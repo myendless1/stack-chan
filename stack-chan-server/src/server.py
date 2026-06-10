@@ -780,8 +780,23 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs(cache_dir, exist_ok=True)
         pcm_path = os.path.join(cache_dir, f"{name}.pcm")
         wav_path = os.path.join(cache_dir, f"{name}.wav")
+        meta_path = os.path.join(cache_dir, f"{name}.txt")
+        text = HEAD_TOUCH_EVENT_TEXT[name]
+        cached_text = ""
+        if os.path.exists(meta_path):
+            try:
+                cached_text = read_binary_file(meta_path).decode("utf-8")
+            except UnicodeDecodeError:
+                cached_text = ""
+        if cached_text != text:
+            for stale_path in (pcm_path, wav_path):
+                try:
+                    os.remove(stale_path)
+                except FileNotFoundError:
+                    pass
+            if cached_text:
+                print(f"Event audio text changed: {name} {cached_text!r} -> {text!r}", flush=True)
         if not os.path.exists(pcm_path) or os.path.getsize(pcm_path) == 0:
-            text = HEAD_TOUCH_EVENT_TEXT[name]
             print(f"Event audio cache miss: {name} -> {text!r}", flush=True)
             try:
                 audio = self._aliyun_tts_pcm_with_retries(text)
@@ -793,6 +808,10 @@ class Handler(BaseHTTPRequestHandler):
             with open(tmp_path, "wb") as fp:
                 fp.write(audio)
             os.replace(tmp_path, pcm_path)
+            tmp_meta_path = f"{meta_path}.tmp"
+            with open(tmp_meta_path, "w", encoding="utf-8") as fp:
+                fp.write(text)
+            os.replace(tmp_meta_path, meta_path)
             print(f"Event audio cached: {pcm_path} bytes={len(audio)}", flush=True)
         if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
             pcm = read_binary_file(pcm_path)
@@ -1366,7 +1385,7 @@ def main():
     print(f"  health: http://127.0.0.1:{args.port}/health")
     print(f"  ASR:    http://{args.host}:{args.port}/upload")
     print(f"  TTS:    http://{args.host}:{args.port}/stream-speak?text=...")
-    print(f"  Events: http://{args.host}:{args.port}/event-audio/press.pcm -> {args.static_dir}/event-audio")
+    print(f"  Events: http://{args.host}:{args.port}/head-touch-events -> {args.static_dir}/event-audio")
     print(f"  Image:  http://{args.host}:{args.port}/upload-image -> {args.capture_dir}")
     print(f"  Command push via HTTP long poll:")
     print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")
