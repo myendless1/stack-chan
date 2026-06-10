@@ -38,6 +38,22 @@ TOKEN_REGION_ID = "cn-shanghai"
 TOKEN_API_VERSION = "2019-02-28"
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 DEVICE_ONLINE_TTL_SECONDS = 90
+DIALOG_AWAKE_SECONDS = 60
+DIALOG_WAKE_WORDS = ("小派同学", "小派同學", "小派", "xiaopai")
+DIALOG_SLEEP_WORDS = (
+    "退下",
+    "退一下",
+    "退一下吧",
+    "退一退",
+    "拜拜",
+    "再见",
+    "再會",
+    "再会",
+    "不用了",
+    "先这样",
+    "先這樣",
+)
+DIALOG_WAKE_ONLY_FILLERS = ("你好", "您好", "在吗", "在嗎", "醒醒", "hello", "hi", "嗨", "哈喽", "哈囉")
 
 AVAILABLE_EXPRESSIONS = (
     "calm",
@@ -370,6 +386,25 @@ def normalize_voice_command_text(text: str) -> str:
     return re.sub(r"[\s,_\-，。.!！?？/（）()]+", "", text.strip().lower())
 
 
+def has_dialog_wake_word(text: str) -> bool:
+    normalized = normalize_voice_command_text(text)
+    return any(normalize_voice_command_text(word) in normalized for word in DIALOG_WAKE_WORDS)
+
+
+def has_dialog_sleep_word(text: str) -> bool:
+    normalized = normalize_voice_command_text(text)
+    return any(normalize_voice_command_text(word) in normalized for word in DIALOG_SLEEP_WORDS)
+
+
+def is_wake_only_text(text: str) -> bool:
+    normalized = normalize_voice_command_text(text)
+    for word in DIALOG_WAKE_WORDS:
+        normalized = normalized.replace(normalize_voice_command_text(word), "")
+    for filler in DIALOG_WAKE_ONLY_FILLERS:
+        normalized = normalized.replace(normalize_voice_command_text(filler), "")
+    return not normalized
+
+
 def parse_voice_face_command(text: str) -> dict | None:
     normalized = normalize_voice_command_text(text)
     if not normalized:
@@ -615,6 +650,35 @@ class Handler(BaseHTTPRequestHandler):
 
         response = {"type": "stt", "text": text, "task_id": result.get("task_id", ""), "device_id": device_id}
         if text:
+            if has_dialog_sleep_word(text):
+                self._sleep_dialog(device_id, reason=text)
+                response["handled_as"] = "sleep"
+                response["dialog_awake"] = False
+                self._send_json(response)
+                return
+
+            woke_by_word = has_dialog_wake_word(text)
+            if woke_by_word:
+                self._wake_dialog(device_id, reason=text)
+                response["woke_by"] = "wake_word"
+                if is_wake_only_text(text):
+                    command = make_command("speak", {"text": "我在"}, priority=1, interrupt=True)
+                    self._enqueue_command(device_id, command)
+                    response["handled_as"] = "wake"
+                    response["dialog_awake"] = True
+                    response["queued_command"] = command["cmd_id"]
+                    self._send_json(response)
+                    return
+            elif not self._dialog_awake(device_id):
+                response["handled_as"] = "sleeping"
+                response["dialog_awake"] = False
+                print(f"ASR ignored while sleeping: device={device_id} text={text!r}", flush=True)
+                self._send_json(response)
+                return
+            else:
+                self._wake_dialog(device_id, reason="dialog activity")
+
+            response["dialog_awake"] = True
             openclaw_result = self._handle_openclaw_event(
                 device_id,
                 "speech_recognition",
@@ -682,6 +746,22 @@ class Handler(BaseHTTPRequestHandler):
             details["name"] = name
         if text:
             details["text"] = text
+
+        if str(event_type) in ("head_touch", "touch"):
+            command = make_command("face", {"expression": "shy"}, priority=1, interrupt=True)
+            self._enqueue_command(device_id, command)
+            self._send_json(
+                {
+                    "type": "event",
+                    "device_id": device_id,
+                    "event_type": event_type,
+                    "name": name,
+                    "openclaw_enabled": self._openclaw_enabled(),
+                    "openclaw_skipped": "local_head_touch_expression",
+                    "queued_commands": [command["cmd_id"]],
+                }
+            )
+            return
 
         if str(event_type) == "speech_recognition" and not str(details.get("text") or "").strip():
             self._send_json(
@@ -812,11 +892,19 @@ class Handler(BaseHTTPRequestHandler):
         timeout = float(first_value(query, "timeout") or "25")
         timeout = max(0.0, min(timeout, 55.0))
         self._mark_device_seen(device_id)
+        self._expire_dialog_if_needed(device_id)
         queue = self._queue_for(device_id)
         try:
             command = queue.get(timeout=timeout)
             self._send_json({"type": "command", "device_id": device_id, "command": command})
         except Empty:
+            if self._expire_dialog_if_needed(device_id):
+                try:
+                    command = queue.get_nowait()
+                    self._send_json({"type": "command", "device_id": device_id, "command": command})
+                    return
+                except Empty:
+                    pass
             self._send_json({"type": "noop", "device_id": device_id})
 
     def _handle_ack(self, query: dict, posted: dict | None = None):
@@ -865,6 +953,34 @@ class Handler(BaseHTTPRequestHandler):
             self.server.device_order.append(device_id)
         self.server.last_seen[device_id] = time.time()
 
+    def _dialog_awake(self, device_id: str) -> bool:
+        device_id = safe_device_id(device_id)
+        if self._expire_dialog_if_needed(device_id):
+            return False
+        return time.time() < self.server.dialog_awake_until.get(device_id, 0)
+
+    def _expire_dialog_if_needed(self, device_id: str) -> bool:
+        device_id = safe_device_id(device_id)
+        awake_until = self.server.dialog_awake_until.get(device_id, 0)
+        if awake_until > 0 and time.time() >= awake_until:
+            self._sleep_dialog(device_id, reason="timeout")
+            return True
+        return False
+
+    def _wake_dialog(self, device_id: str, reason: str = "") -> None:
+        device_id = safe_device_id(device_id)
+        self.server.dialog_awake_until[device_id] = time.time() + DIALOG_AWAKE_SECONDS
+        print(
+            f"Dialog awake: device={device_id} ttl={DIALOG_AWAKE_SECONDS}s reason={reason!r}",
+            flush=True,
+        )
+
+    def _sleep_dialog(self, device_id: str, reason: str = "") -> None:
+        device_id = safe_device_id(device_id)
+        self.server.dialog_awake_until[device_id] = 0
+        self._enqueue_command(device_id, make_command("face", {"expression": "calm"}, priority=1, interrupt=True))
+        print(f"Dialog sleep: device={device_id} reason={reason!r}", flush=True)
+
     def _openclaw_enabled(self) -> bool:
         return bool(self.server.openclaw_base_url and self.server.openclaw_token)
 
@@ -891,6 +1007,8 @@ class Handler(BaseHTTPRequestHandler):
         for command in commands:
             self._enqueue_command(device_id, command)
             queued.append(command["cmd_id"])
+        if queued:
+            self._wake_dialog(device_id, reason=f"openclaw:{event_type}")
         return {
             "openclaw_enabled": True,
             "openclaw_response": content,
@@ -1777,6 +1895,7 @@ def main():
     httpd.last_ack = {}
     httpd.last_seen = {}
     httpd.device_order = []
+    httpd.dialog_awake_until = {}
 
     print("Xiaopai Aliyun voice bridge")
     print(f"  health: http://127.0.0.1:{args.port}/health")

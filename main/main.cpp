@@ -92,6 +92,7 @@ static constexpr const char* TAG = "Xiaopai";
 static constexpr int kWifiConnectedBit = BIT0;
 static constexpr int kWifiFailedBit = BIT1;
 static constexpr int kHttpBufferSize = 4096;
+static constexpr int kAudioUploadTimeoutMs = 60000;
 static constexpr int kAudioSampleRate = 16000;
 static constexpr int kOpusFrameDurationMs = 60;
 static constexpr int kOpusFrameSamples = kAudioSampleRate * kOpusFrameDurationMs / 1000;
@@ -2510,7 +2511,7 @@ static bool upload_wav_recording(const std::vector<int16_t>& pcm)
     esp_http_client_config_t config = {};
     config.url = upload_url.c_str();
     config.method = HTTP_METHOD_POST;
-    config.timeout_ms = 20000;
+    config.timeout_ms = kAudioUploadTimeoutMs;
     config.buffer_size = kHttpBufferSize;
     config.buffer_size_tx = kHttpBufferSize;
 
@@ -4217,175 +4218,13 @@ static int16_t head_touch_position(const uint8_t intensities[3])
     return static_cast<int16_t>(weighted / total);
 }
 
-static bool play_pcm_url_buffered(const std::string& url, const char* label)
-{
-    ESP_LOGI(TAG, "Buffered PCM URL: %s", url.c_str());
-    esp_http_client_config_t config = {};
-    config.url = url.c_str();
-    config.method = HTTP_METHOD_GET;
-    config.timeout_ms = 15000;
-    config.buffer_size = kHttpBufferSize;
-    config.buffer_size_tx = kHttpBufferSize;
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == nullptr) {
-        ESP_LOGE(TAG, "Buffered PCM init failed");
-        return false;
-    }
-
-    esp_http_client_set_header(client, "Accept", "application/octet-stream");
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Buffered PCM open failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        return false;
-    }
-
-    int content_length = esp_http_client_fetch_headers(client);
-    int status = esp_http_client_get_status_code(client);
-    ESP_LOGI(TAG, "Buffered PCM HTTP status=%d content_length=%d label=%s", status, content_length,
-             label != nullptr ? label : "");
-    if (status < 200 || status >= 300) {
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return false;
-    }
-
-    std::vector<uint8_t> bytes;
-    if (content_length > 0 && static_cast<size_t>(content_length) <= kTtsMaxBytes) {
-        bytes.reserve(content_length);
-    }
-
-    uint8_t read_buffer[kHttpBufferSize];
-    while (!app2_stop_requested) {
-        int read_len = esp_http_client_read(client, reinterpret_cast<char*>(read_buffer), sizeof(read_buffer));
-        if (read_len < 0) {
-            ESP_LOGE(TAG, "Buffered PCM read failed");
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-            return false;
-        }
-        if (read_len == 0) {
-            break;
-        }
-        if (bytes.size() + static_cast<size_t>(read_len) > kTtsMaxBytes) {
-            ESP_LOGE(TAG, "Buffered PCM exceeds max bytes");
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-            return false;
-        }
-        bytes.insert(bytes.end(), read_buffer, read_buffer + read_len);
-    }
-
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    if (bytes.size() < 2 || app2_stop_requested) {
-        return false;
-    }
-    if ((bytes.size() & 1) != 0) {
-        bytes.pop_back();
-    }
-
-    std::vector<int16_t> samples(bytes.size() / sizeof(int16_t));
-    memcpy(samples.data(), bytes.data(), samples.size() * sizeof(int16_t));
-
-    M5.Speaker.stop();
-    if (!M5.Speaker.playRaw(samples.data(), samples.size(), kTtsStreamSampleRate, false, 1, 0, false)) {
-        ESP_LOGE(TAG, "Buffered PCM playRaw failed");
-        return false;
-    }
-
-    while (M5.Speaker.isPlaying() && !app2_stop_requested) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    if (!app2_stop_requested) {
-        vTaskDelay(pdMS_TO_TICKS(kSpeakerDrainMs));
-    }
-    M5.Speaker.stop();
-    return !app2_stop_requested;
-}
-
-static void play_head_touch_event_audio(HeadTouchEvent event)
-{
-    const char* name = head_touch_event_name(event);
-    std::string url = make_server_url("/event-audio/");
-    url += name;
-    url += ".pcm";
-
-    voice_listener_paused = true;
-    vTaskDelay(pdMS_TO_TICKS(120));
-    while (M5.Mic.isRecording()) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    M5.Mic.end();
-
-    if (audio_mutex != nullptr) {
-        xSemaphoreTake(audio_mutex, portMAX_DELAY);
-    }
-    if (!M5.Speaker.begin()) {
-        ESP_LOGE(TAG, "M5.Speaker.begin failed for head touch event");
-        if (audio_mutex != nullptr) {
-            xSemaphoreGive(audio_mutex);
-        }
-        voice_listener_paused = false;
-        return;
-    }
-    M5.Speaker.setVolume(CONFIG_STACKCHAN_TTS_VOLUME);
-    app2_stop_requested = false;
-    start_speaking_animation();
-    play_pcm_url_buffered(url, name);
-    M5.Speaker.end();
-    stop_speaking_animation();
-    if (audio_mutex != nullptr) {
-        xSemaphoreGive(audio_mutex);
-    }
-    voice_listener_paused = false;
-}
-
-static bool report_head_touch_event_to_server(HeadTouchEvent event)
-{
-    std::string url = make_server_url("/device/event");
-    url += "?device_id=";
-    url += url_encode(mac_address().c_str());
-    url += "&type=head_touch&name=";
-    url += url_encode(head_touch_event_name(event));
-
-    std::string response;
-    if (!http_get_string(url, &response, 12000) || response.empty()) {
-        ESP_LOGW(TAG, "Head touch event report failed: %s", head_touch_event_name(event));
-        return false;
-    }
-
-    cJSON* root = cJSON_Parse(response.c_str());
-    if (root == nullptr) {
-        ESP_LOGW(TAG, "Head touch event response is not JSON: %s", response.c_str());
-        return false;
-    }
-
-    bool queued = false;
-    const cJSON* queued_commands = cJSON_GetObjectItemCaseSensitive(root, "queued_commands");
-    if (cJSON_IsArray(queued_commands) && cJSON_GetArraySize(queued_commands) > 0) {
-        queued = true;
-    }
-    std::string error = json_string_value(root, "openclaw_error");
-    if (!error.empty()) {
-        ESP_LOGW(TAG, "Head touch OpenClaw error: %s", error.c_str());
-    }
-    cJSON_Delete(root);
-
-    ESP_LOGI(TAG, "Head touch event reported: %s queued=%d", head_touch_event_name(event), queued ? 1 : 0);
-    return queued;
-}
-
 static void run_head_touch_audio_loop()
 {
     while (true) {
         HeadTouchEvent event = HeadTouchEvent::Press;
         if (xQueueReceive(head_touch_event_queue, &event, portMAX_DELAY) == pdTRUE) {
-            if (!report_head_touch_event_to_server(event)) {
-                play_head_touch_event_audio(event);
-            }
+            ESP_LOGI(TAG, "Head touch local expression: %s -> shy", head_touch_event_name(event));
+            show_expression("shy");
         }
     }
 }
