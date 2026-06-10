@@ -229,11 +229,11 @@ struct WifiCandidate {
 static constexpr WifiCandidate kWifiCandidates[] = {
     {CONFIG_STACKCHAN_WIFI_SSID, CONFIG_STACKCHAN_WIFI_PASSWORD},
     {"MYENDLESS", "88888888"},
-    {"myendless", "88888888"},
 };
 static constexpr int kWifiCandidateCount = sizeof(kWifiCandidates) / sizeof(kWifiCandidates[0]);
 
 static constexpr const char* kServerBaseCandidates[] = {
+    "http://1.14.134.217:8091/",
     "http://192.168.21.15:8091",
     "http://172.24.77.83:8091",
     "http://192.168.137.1:8091",
@@ -1275,6 +1275,7 @@ static bool ensure_wifi_connected(bool allow_connect, bool force_candidate_scan 
                                                             nullptr));
 
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
         ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     }
 
