@@ -1925,10 +1925,7 @@ static bool wifi_is_connected()
 
     wifi_ap_record_t ap_info = {};
     if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-        if (wifi_event_group != nullptr) {
-            xEventGroupSetBits(wifi_event_group, kWifiConnectedBit);
-        }
-        return true;
+        return wifi_event_group != nullptr && (xEventGroupGetBits(wifi_event_group) & kWifiConnectedBit) != 0;
     }
 
     if (wifi_event_group != nullptr) {
