@@ -70,7 +70,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--output", default="recordings")
     args = parser.parse_args()
 

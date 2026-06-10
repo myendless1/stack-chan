@@ -243,7 +243,7 @@ def build_backend(args):
 def main():
     parser = argparse.ArgumentParser(description="Local open-source STT API for Stack-chan.")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--output", default="recordings")
     parser.add_argument("--backend", choices=("faster-whisper", "whisper-cpp"), default="faster-whisper")
     parser.add_argument("--model", default=os.environ.get("STACKCHAN_STT_MODEL", "small"))

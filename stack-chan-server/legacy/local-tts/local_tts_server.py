@@ -127,7 +127,7 @@ class LocalTTSHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="Local Piper TTS WAV API for Stack-chan.")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8090)
+    parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--piper-binary", default="piper")
     parser.add_argument("--model", required=True, help="Path to a Piper .onnx voice model")
     parser.add_argument("--config", help="Optional path to the matching .onnx.json config")

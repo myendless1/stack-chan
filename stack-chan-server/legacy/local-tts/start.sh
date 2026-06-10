@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 SERVER_DIR="$(cd ../.. && pwd)"
 
 HOST="${STACKCHAN_TTS_HOST:-0.0.0.0}"
-PORT="${STACKCHAN_TTS_PORT:-8090}"
+PORT="${STACKCHAN_TTS_PORT:-8091}"
 MODEL="${STACKCHAN_TTS_MODEL:-$SERVER_DIR/models/zh_CN-huayan-x_low.onnx}"
 CONFIG="${STACKCHAN_TTS_CONFIG:-$SERVER_DIR/models/zh_CN-huayan-x_low.onnx.json}"
 VENV="${STACKCHAN_TTS_VENV:-.venv-tts}"

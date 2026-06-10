@@ -212,6 +212,7 @@ std::string active_wifi_ssid = CONFIG_STACKCHAN_WIFI_SSID;
 std::string active_server_base = "http://192.168.21.15:8091";
 bool active_server_selected = false;
 int active_wifi_candidate_index = -1;
+static constexpr int kWifiRetryLimit = 1;
 
 enum class HeadTouchEvent : uint8_t {
     Press,
@@ -1174,9 +1175,9 @@ static void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event
         if (wifi_manual_switching) {
             return;
         }
-        if (wifi_retry_count++ < 5) {
+        if (wifi_retry_count++ < kWifiRetryLimit) {
             esp_wifi_connect();
-            ESP_LOGI(TAG, "Retry WiFi connection (%d/5)", wifi_retry_count);
+            ESP_LOGI(TAG, "Retry WiFi connection (%d/%d)", wifi_retry_count, kWifiRetryLimit);
         } else {
             xEventGroupSetBits(wifi_event_group, kWifiFailedBit);
         }
