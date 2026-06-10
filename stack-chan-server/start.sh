@@ -78,4 +78,6 @@ echo "---- stack-chan-server start $(date '+%Y-%m-%d %H:%M:%S') ----" >> "$LOG_F
 PYTHONUNBUFFERED=1 "$VENV/bin/python" src/server.py \
   --host "$HOST" \
   --port "$PORT" \
-  2>&1 | tee -a "$LOG_FILE"
+  2>&1 | tee -a "$LOG_FILE" &
+
+echo "Use \`pkill -f -9 server.py\` to stop the server."
