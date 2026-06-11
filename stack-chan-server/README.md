@@ -6,7 +6,7 @@ Local bridge server for the Xiaopai firmware in this repository. It keeps cloud 
 
 - Aliyun NLS speech-to-text upload for recorded WAV/PCM audio.
 - Aliyun NLS text-to-speech as streaming `pcm_s16le` audio.
-- OpenClaw event bridge: speech recognition text and head-touch events can be sent to OpenClaw, then executed as Xiaopai `speak` / `action` commands.
+- OpenClaw event bridge: speech recognition text and device events can be sent to OpenClaw; OpenClaw controls Xiaopai through the HTTP command API.
 - Camera upload receiver for Xiaopai RGB565 frames.
 - RGB565 conversion to PNG and BMP. The Xiaopai camera data is decoded as big-endian RGB565.
 - Face detection visualization using `ageitgey/face_recognition`: detected face boxes and landmarks are saved as `*.faces.png`.
@@ -67,7 +67,7 @@ Device ACK endpoint.
 
 `GET /device/event?device_id=...&type=head_touch&name=click`
 
-Device event endpoint. Xiaopai uses this to report head-touch events to OpenClaw. When OpenClaw returns tags such as `<speak>...</speak>` and `<action>...</action>`, the server converts them into the same command queue consumed by `/device/next-command`.
+Device event endpoint. Xiaopai uses this to report events to OpenClaw. The server forwards configured events but does not parse OpenClaw replies; OpenClaw should call the HTTP command endpoints to queue actions consumed by `/device/next-command`.
 
 `GET /command/<type>`
 
@@ -119,17 +119,7 @@ Queues the full command schema as JSON:
 
 Audio upload endpoint for speech recognition. The body can be WAV or raw PCM. WAV sample rate is detected from the header; raw PCM defaults to `STACKCHAN_ALIYUN_SAMPLE_RATE` or `16000`.
 
-When OpenClaw is configured, recognized text is sent to OpenClaw first. The server prepends a Xiaopai system prompt requiring this response format:
-
-```text
-<speak>text for Xiaopai to say</speak>
-<action>thinking</action>
-<action>move:left:15</action>
-```
-
-Supported actions include expressions (`calm`, `shy`, `thinking`, `happy_squint`, `happy_squint_soft`, `heart`, `heart_small`), animations (`blink`, `wink`, `heart_action`, `nod`, `speak`, `happy_dynamic`), and head movement (`move:left:15`, `move:right:15`, `move:up:10`, `move:down:10`, `move:center`).
-
-After recognition, custom speak commands such as `讲个笑话` are queued as Xiaopai speech commands. Motion phrases such as `左转15度`, `向右转二十度`, `抬头10度`, `低头五度`, and `请回正` are queued as Xiaopai motion commands instead of being spoken back. Face phrases such as `切换到平静表情`, `开心`, `说话动作`, `害羞表情`, `眯眼笑`, `爱心`, `眨眼`, and `思考` are queued as face commands. Other recognized text is still repeated as TTS.
+When OpenClaw is configured, recognized text is sent to OpenClaw. The server does not read or parse OpenClaw response text, tags, or actions. OpenClaw should call the command API above when it wants Xiaopai to speak, move, or change expression.
 
 `POST /upload-audio`
 
@@ -138,7 +128,7 @@ Alias for `/upload`. The firmware uses this route in background listening mode.
 Response:
 
 ```json
-{"type": "stt", "text": "...", "task_id": "...", "handled_as": "motion|face|repeat"}
+{"type": "stt", "text": "...", "task_id": "...", "handled_as": "openclaw_forwarded", "openclaw_sent": true}
 ```
 
 `GET /stream-speak?text=...`

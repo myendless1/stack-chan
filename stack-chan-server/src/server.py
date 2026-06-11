@@ -39,6 +39,7 @@ TOKEN_API_VERSION = "2019-02-28"
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 DEVICE_ONLINE_TTL_SECONDS = 90
 DIALOG_AWAKE_SECONDS = 60
+LOG_TEXT_MAX_CHARS = 2000
 DIALOG_WAKE_WORDS = ("小派同学", "小派同學", "小派", "xiaopai")
 DIALOG_SLEEP_WORDS = (
     "退下",
@@ -93,29 +94,10 @@ HEAD_TOUCH_EVENT_TEXT = {
     "swipe_backward": "你好，我是小派同学",
 }
 
-XIAOPAI_OPENCLAW_SYSTEM_PROMPT = """你现在需要对接“小派同学”（用户终端小机器人）的用户交互事件。
+XIAOPAI_OPENCLAW_SYSTEM_PROMPT = """你会收到“小派同学”（用户终端小机器人）的语音识别文本或设备事件。
 
-你的输出会被机器解析并立即执行，因此必须遵守以下格式：
-1. 小机器人需要对用户说出的文本，必须使用 <speak>...</speak> 包裹。
-2. 小机器人需要执行的动作，必须使用 <action>...</action> 包裹。
-3. 可以按需要输出多个标签，执行顺序就是标签出现顺序；不要输出未包裹在 speak/action 标签外的解释文字。
-4. 不要输出 Markdown、代码块、JSON 外壳或额外说明。
-
-可用 action：
-- 表情：calm、shy、thinking、happy_squint、happy_squint_soft、heart、heart_small。
-- 动画：blink、wink、heart_action、nod、speak、happy_dynamic。
-- 头部动作：move:left:15、move:right:15、move:up:10、move:down:10、move:center。其中数字是角度，可按语境调整。
-
-示例：
-<action>thinking</action><speak>我想一下。</speak><action>happy_squint</action>
-<action>blink</action><speak>你好，我是小派同学。</speak>
-<action>move:left:15</action><speak>我往左看一下。</speak>
-
-交互原则：
-- 用户语音识别结果就是用户刚刚说的话；触摸、点击、滑动等是用户对机器人的非语言互动。
-- 回复要短，适合语音播报，避免长段落。
-- 如果只是触摸或轻拍，可以自然回应，不要每次都解释事件来源。
-- 需要先表现思考时可先输出 <action>thinking</action>，说完后可切回 <action>calm</action> 或 <action>happy_squint</action>。
+这个服务端只负责把文本/事件转发给你，不会解析你的回复来控制机器人。
+如果需要让机器人说话、移动或切换表情，请主动调用小派服务端提供的 HTTP 控制 API。
 """
 
 EXPRESSION_ALIASES = {
@@ -643,7 +625,12 @@ class Handler(BaseHTTPRequestHandler):
         text = result.get("result", "")
         status = result.get("status")
         message = result.get("message", "")
-        print(f"ASR result: status={status} text={text!r} message={message!r}")
+        print(
+            "Speech recognition result: "
+            f"device={device_id} status={status} task_id={result.get('task_id', '')!r} "
+            f"text={text!r} message={message!r}",
+            flush=True,
+        )
         if status != 20000000:
             self._send_json({"type": "error", "message": message or f"Aliyun ASR status {status}"}, HTTPStatus.BAD_GATEWAY)
             return
@@ -679,52 +666,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._wake_dialog(device_id, reason="dialog activity")
 
             response["dialog_awake"] = True
-            openclaw_result = self._handle_openclaw_event(
+            openclaw_result = self._send_openclaw_event(
                 device_id,
                 "speech_recognition",
                 {"text": text},
-                priority=1,
-                interrupt=True,
             )
-            if openclaw_result.get("queued_commands"):
-                response.update(openclaw_result)
-                response["handled_as"] = "openclaw"
-            else:
-                if openclaw_result.get("openclaw_error"):
-                    response["openclaw_error"] = openclaw_result["openclaw_error"]
-                speak_payload = parse_voice_speak_command(text)
-                if speak_payload:
-                    source_text = speak_payload.pop("source_text", text)
-                    command_name = speak_payload.pop("name", "")
-                    command = make_command("speak", speak_payload, priority=1, interrupt=True)
-                    response["handled_as"] = "speak"
-                    response["speak"] = {"name": command_name}
-                    response["source_text"] = source_text
-                elif motion_payload := parse_voice_motion_command(text):
-                    source_text = motion_payload.pop("source_text", text)
-                    command = make_command("motion", motion_payload, priority=1, interrupt=True)
-                    response["handled_as"] = "motion"
-                    response["motion"] = motion_payload
-                    response["source_text"] = source_text
-                elif face_payload := parse_voice_face_command(text):
-                    source_text = face_payload.pop("source_text", text)
-                    command = make_command("face", face_payload, priority=1, interrupt=True)
-                    response["handled_as"] = "face"
-                    response["face"] = face_payload
-                    response["source_text"] = source_text
-                else:
-                    reply = f"我听到你说：{text}"
-                    command = make_command(
-                        "sequence",
-                        [
-                            {"type": "face", "expression": "thinking"},
-                            {"type": "speak", "text": reply},
-                            {"type": "face", "expression": "happy_squint"},
-                        ],
-                    )
-                    response["handled_as"] = "repeat"
-                self._enqueue_command(device_id, command)
-                response["queued_command"] = command["cmd_id"]
+            response.update(openclaw_result)
+            response["handled_as"] = "openclaw_forwarded" if openclaw_result.get("openclaw_sent") else "openclaw_not_sent"
         else:
             response["handled_as"] = "empty"
             print(f"ASR empty, skip OpenClaw: device={device_id}", flush=True)
@@ -758,6 +706,7 @@ class Handler(BaseHTTPRequestHandler):
                     "name": name,
                     "openclaw_enabled": self._openclaw_enabled(),
                     "openclaw_skipped": "local_head_touch_expression",
+                    "openclaw_sent": False,
                     "queued_commands": [command["cmd_id"]],
                 }
             )
@@ -772,18 +721,20 @@ class Handler(BaseHTTPRequestHandler):
                     "name": name,
                     "openclaw_enabled": self._openclaw_enabled(),
                     "openclaw_skipped": "empty_speech_recognition",
+                    "openclaw_sent": False,
                     "queued_commands": [],
                 }
             )
             print(f"Speech event empty, skip OpenClaw: device={device_id}", flush=True)
             return
 
-        result = self._handle_openclaw_event(device_id, str(event_type), details, priority=1, interrupt=False)
+        result = self._send_openclaw_event(device_id, str(event_type), details)
         body = {
             "type": "event",
             "device_id": device_id,
             "event_type": event_type,
             "name": name,
+            "queued_commands": [],
             **result,
         }
         self._send_json(body)
@@ -984,39 +935,28 @@ class Handler(BaseHTTPRequestHandler):
     def _openclaw_enabled(self) -> bool:
         return bool(self.server.openclaw_base_url and self.server.openclaw_token)
 
-    def _handle_openclaw_event(
-        self,
-        device_id: str,
-        event_type: str,
-        details: dict,
-        priority: int = 1,
-        interrupt: bool = False,
-    ) -> dict:
+    def _send_openclaw_event(self, device_id: str, event_type: str, details: dict) -> dict:
         if not self._openclaw_enabled():
-            return {"openclaw_enabled": False, "queued_commands": []}
+            return {"openclaw_enabled": False, "openclaw_sent": False, "queued_commands": []}
 
         try:
-            content = self._call_openclaw(device_id, event_type, details)
-            steps = parse_openclaw_response_steps(content)
-            commands = commands_from_openclaw_steps(steps, priority=priority, interrupt=interrupt)
+            self._call_openclaw(device_id, event_type, details)
         except Exception as exc:
             print(f"OpenClaw event failed: device={device_id} event={event_type} error={exc}", file=sys.stderr, flush=True)
-            return {"openclaw_enabled": True, "openclaw_error": str(exc), "queued_commands": []}
+            return {
+                "openclaw_enabled": True,
+                "openclaw_sent": False,
+                "openclaw_error": str(exc),
+                "queued_commands": [],
+            }
 
-        queued = []
-        for command in commands:
-            self._enqueue_command(device_id, command)
-            queued.append(command["cmd_id"])
-        if queued:
-            self._wake_dialog(device_id, reason=f"openclaw:{event_type}")
         return {
             "openclaw_enabled": True,
-            "openclaw_response": content,
-            "openclaw_steps": steps,
-            "queued_commands": queued,
+            "openclaw_sent": True,
+            "queued_commands": [],
         }
 
-    def _call_openclaw(self, device_id: str, event_type: str, details: dict) -> str:
+    def _call_openclaw(self, device_id: str, event_type: str, details: dict) -> None:
         event_text = build_openclaw_event_text(event_type, details)
         url = self.server.openclaw_base_url.rstrip("/") + "/chat/completions"
         payload = {
@@ -1043,20 +983,18 @@ class Handler(BaseHTTPRequestHandler):
         )
         try:
             with urllib.request.urlopen(req, timeout=self.server.openclaw_timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+                status = getattr(resp, "status", HTTPStatus.OK)
+                response_text = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"OpenClaw HTTP {exc.code}: {detail}") from exc
 
-        choices = body.get("choices") or []
-        if not choices:
-            raise RuntimeError(f"OpenClaw returned no choices: {body}")
-        message = choices[0].get("message") or {}
-        content = str(message.get("content") or "").strip()
-        if not content:
-            raise RuntimeError(f"OpenClaw returned empty content: {body}")
-        print(f"OpenClaw response: device={device_id} event={event_type} content={content!r}", flush=True)
-        return content
+        print(
+            "OpenClaw response result: "
+            f"device={device_id} event={event_type} status={status} "
+            f"body={truncate_log_text(response_text)!r}",
+            flush=True,
+        )
 
     def _handle_event_audio(self, filename: str):
         audio_ext = "wav" if filename.endswith(".wav") else "pcm"
@@ -1354,6 +1292,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+        self._log_api_result(body, status)
+
+    def _log_api_result(self, body: dict, status: HTTPStatus) -> None:
+        path, _query = self._path_query()
+        if not (
+            path == "/command"
+            or path.startswith("/command/")
+            or path.startswith("/action/")
+            or path.startswith("/expression/")
+            or path in ("/device/event", "/event", "/device/ack")
+        ):
+            return
+        print(
+            "API result: "
+            f"method={self.command} path={self.path!r} status={int(status)} "
+            f"body={compact_log_json(body)}",
+            flush=True,
+        )
 
     def log_message(self, fmt, *args):
         print(f"{self.client_address[0]} - {fmt % args}")
@@ -1366,6 +1322,21 @@ def required_env(name: str) -> str:
     return value
 
 
+def truncate_log_text(value: str, limit: int = LOG_TEXT_MAX_CHARS) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...<truncated {len(text) - limit} chars>"
+
+
+def compact_log_json(value) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        text = repr(value)
+    return truncate_log_text(text)
+
+
 def build_openclaw_event_text(event_type: str, details: dict) -> str:
     event_type = str(event_type or "event").strip() or "event"
     compact_details = {str(key): value for key, value in details.items() if value not in (None, "")}
@@ -1374,8 +1345,7 @@ def build_openclaw_event_text(event_type: str, details: dict) -> str:
         return (
             "小派同学收到用户语音交互识别结果。\n"
             f"事件类型：speech_recognition\n"
-            f"用户文本：{text}\n"
-            "请根据系统约定返回 speak/action 标签。"
+            f"用户文本：{text}"
         )
     if event_type in ("head_touch", "touch"):
         name = str(compact_details.get("name") or compact_details.get("event") or "").strip()
@@ -1383,171 +1353,12 @@ def build_openclaw_event_text(event_type: str, details: dict) -> str:
             "小派同学收到头部触摸事件。\n"
             f"事件类型：head_touch\n"
             f"触摸名称：{name}\n"
-            f"事件详情：{json.dumps(compact_details, ensure_ascii=False)}\n"
-            "请根据系统约定返回 speak/action 标签。"
+            f"事件详情：{json.dumps(compact_details, ensure_ascii=False)}"
         )
     return (
         "小派同学收到设备事件。\n"
         f"事件类型：{event_type}\n"
-        f"事件详情：{json.dumps(compact_details, ensure_ascii=False)}\n"
-        "请根据系统约定返回 speak/action 标签。"
-    )
-
-
-def parse_openclaw_response_steps(content: str) -> list[dict]:
-    content = str(content or "").strip()
-    if not content:
-        return []
-
-    steps: list[dict] = []
-    tag_pattern = re.compile(r"<\s*(speak|action)\s*>(.*?)<\s*/\s*\1\s*>", re.IGNORECASE | re.DOTALL)
-    for match in tag_pattern.finditer(content):
-        tag = match.group(1).lower()
-        value = html_unescape(match.group(2)).strip()
-        if not value:
-            continue
-        if tag == "speak":
-            steps.append({"type": "speak", "text": value})
-        else:
-            steps.extend(parse_openclaw_action_steps(value))
-
-    if not steps:
-        cleaned = re.sub(r"<[^>]+>", "", content).strip()
-        if cleaned:
-            steps.append({"type": "speak", "text": html_unescape(cleaned)})
-    return steps
-
-
-def parse_openclaw_action_steps(value: str) -> list[dict]:
-    value = value.strip()
-    if not value:
-        return []
-
-    if value.startswith("{"):
-        try:
-            payload = json.loads(value)
-            step = normalize_openclaw_action_object(payload)
-            return [step] if step else []
-        except json.JSONDecodeError:
-            pass
-
-    steps = []
-    parts = [part.strip() for part in re.split(r"[\n;；]+", value) if part.strip()]
-    for part in parts or [value]:
-        step = parse_openclaw_action_text(part)
-        if step:
-            steps.append(step)
-    return steps
-
-
-def normalize_openclaw_action_object(payload: dict) -> dict | None:
-    if not isinstance(payload, dict):
-        return None
-    action_type = str(payload.get("type") or payload.get("action") or payload.get("name") or "").strip()
-    if action_type in ("face", "expression"):
-        expression = normalize_expression_name(str(payload.get("expression") or payload.get("face") or payload.get("name") or "calm"))
-        return {"type": "face", "expression": expression}
-    if action_type in ("motion", "move"):
-        direction = str(payload.get("direction") or payload.get("action") or payload.get("name") or "center").strip()
-        if direction in ("motion", "move"):
-            direction = "center"
-        step = {"type": "move", "action": normalize_motion_direction(direction)}
-        if "degree" in payload or "degrees" in payload:
-            step["degree"] = float(payload.get("degree") or payload.get("degrees") or 15)
-        if "duration_ms" in payload:
-            step["duration_ms"] = int(payload.get("duration_ms") or 500)
-        return step
-    return parse_openclaw_action_text(action_type)
-
-
-def parse_openclaw_action_text(value: str) -> dict | None:
-    raw = normalize_voice_command_text(value)
-    if not raw:
-        return None
-
-    move_match = re.match(r"^(?:move|motion|head)?[:：]?(left|right|up|down|center|home)(?:[:：,， ]?([0-9]+(?:\.[0-9]+)?))?$", raw)
-    if move_match:
-        action = normalize_motion_direction(move_match.group(1))
-        step = {"type": "move", "action": action}
-        if move_match.group(2) and action not in ("center", "home"):
-            step["degree"] = float(move_match.group(2))
-        return step
-
-    if raw in ("center", "home", "回正", "归位", "复位"):
-        return {"type": "move", "action": "center"}
-
-    expression = normalize_expression_name(value)
-    if expression in AVAILABLE_EXPRESSIONS or expression in AVAILABLE_ACTIONS:
-        return {"type": "face", "expression": expression}
-
-    motion = parse_voice_motion_command(value)
-    if motion:
-        motion.pop("source_text", None)
-        action = motion.pop("type", "center")
-        return {"type": "move", "action": normalize_motion_direction(action), **motion}
-
-    face = parse_voice_face_command(value)
-    if face:
-        face.pop("source_text", None)
-        return {"type": "face", **face}
-
-    return None
-
-
-def normalize_motion_direction(value: str) -> str:
-    value = str(value or "").strip().lower()
-    return MOTION_DIRECTION_ALIASES.get(value, "center" if value in ("home", "center") else value)
-
-
-def commands_from_openclaw_steps(steps: list[dict], priority: int = 1, interrupt: bool = False) -> list[dict]:
-    normalized = [normalize_openclaw_step(step) for step in steps]
-    normalized = [step for step in normalized if step]
-    if not normalized:
-        return []
-    if len(normalized) == 1:
-        step = normalized[0]
-        if step["type"] == "face":
-            return [make_command("face", {"expression": step["expression"]}, priority=priority, interrupt=interrupt)]
-        if step["type"] == "speak":
-            return [make_command("speak", {"text": step["text"]}, priority=priority, interrupt=interrupt)]
-        if step["type"] == "move":
-            payload = {
-                "type": step.get("action", "center"),
-                "degree": step.get("degree", 15),
-                "duration_ms": step.get("duration_ms", 500),
-            }
-            return [make_command("motion", payload, priority=priority, interrupt=interrupt)]
-    return [make_command("sequence", normalized, priority=priority, interrupt=interrupt)]
-
-
-def normalize_openclaw_step(step: dict) -> dict | None:
-    if not isinstance(step, dict):
-        return None
-    step_type = step.get("type")
-    if step_type == "speak":
-        text = str(step.get("text") or "").strip()
-        return {"type": "speak", "text": text} if text else None
-    if step_type == "face":
-        expression = normalize_expression_name(str(step.get("expression") or "calm"))
-        return {"type": "face", "expression": expression}
-    if step_type in ("move", "motion"):
-        action = normalize_motion_direction(str(step.get("action") or step.get("direction") or step.get("type") or "center"))
-        normalized = {"type": "move", "action": action}
-        if action not in ("center", "home"):
-            normalized["degree"] = float(step.get("degree") or step.get("degrees") or 15)
-        normalized["duration_ms"] = int(step.get("duration_ms") or 500)
-        return normalized
-    return None
-
-
-def html_unescape(value: str) -> str:
-    return (
-        str(value)
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
+        f"事件详情：{json.dumps(compact_details, ensure_ascii=False)}"
     )
 
 

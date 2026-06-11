@@ -205,13 +205,6 @@ Stop current playback and show the stopped face state.
 GET /command/stop
 ```
 
-## OpenClaw Tag Alternative
+## OpenClaw Control
 
-The server also supports an OpenClaw-style tag contract for internal ASR/event handling:
-
-```text
-<action>thinking</action><speak>我想一下。</speak><action>happy_squint</action>
-<action>move:left:15</action><speak>我往左看一下。</speak>
-```
-
-For direct HTTP control, prefer `POST /command` or the `GET /command/<type>` endpoints above.
+ASR text and device events can be forwarded to OpenClaw when configured, but the server does not parse OpenClaw replies. OpenClaw should control Xiaopai by calling `POST /command`, `GET /command/<type>`, `GET /expression/<name>`, or `GET /action/<name>`.

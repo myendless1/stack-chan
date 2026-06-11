@@ -361,21 +361,9 @@ Content-Type: application/json
 }
 ```
 
-When OpenClaw is configured, the server sends the event with the Xiaopai output contract as the system prompt. OpenClaw should reply with ordered tags:
+When OpenClaw is configured, the server forwards the event to OpenClaw and does not parse the returned text. OpenClaw should queue Xiaopai behavior by calling the HTTP command endpoints such as `POST /command`, `GET /command/<type>`, `GET /expression/<name>`, or `GET /action/<name>`.
 
-```text
-<action>thinking</action><speak>我在。</speak><action>happy_squint</action>
-```
-
-Supported `<action>` values include:
-
-```text
-calm, shy, thinking, happy_squint, happy_squint_soft, heart, heart_small
-blink, wink, heart_action, nod, speak, happy_dynamic
-move:left:15, move:right:15, move:up:10, move:down:10, move:center
-```
-
-The response includes `queued_commands`; Xiaopai uses its existing `/device/next-command` long-poll loop to execute those commands.
+The response includes `openclaw_sent` and `queued_commands`. Events forwarded to OpenClaw do not queue commands by themselves; Xiaopai executes commands that OpenClaw sends through the command API and the existing `/device/next-command` long-poll loop.
 
 ## Audio Upload
 
@@ -389,7 +377,7 @@ X-Device-Id: <device_id>
 
 `/upload-audio` is an alias of `/upload`.
 
-If OpenClaw is configured with `OPENCLAW_BASE_URL` and `OPENCLAW_GATEWAY_TOKEN`, non-empty ASR text is sent to OpenClaw before the local demo command rules. The server asks OpenClaw to return only `<speak>...</speak>` and `<action>...</action>` tags, then converts those tags to Xiaopai commands. If OpenClaw is unavailable or returns no executable tags, the local rules below still apply.
+If OpenClaw is configured with `OPENCLAW_BASE_URL` and `OPENCLAW_GATEWAY_TOKEN`, non-empty ASR text is sent to OpenClaw. The server does not read or parse OpenClaw response text, tags, or actions. OpenClaw should call the command API when it wants Xiaopai to speak, move, or change expression.
 
 Response:
 
@@ -399,25 +387,11 @@ Response:
   "text": "用户说的话",
   "task_id": "aliyun-task-id",
   "device_id": "44:1b:f6:e4:83:8c",
-  "handled_as": "motion",
-  "motion": {"type": "left", "degree": 15, "duration_ms": 500},
-  "queued_command": "cmd_abc123"
-}
-```
-
-When ASR text contains a custom speak phrase such as `讲个笑话`, the server queues a `speak` command back to the same device. The firmware then streams the text through Aliyun TTS and plays it.
-
-When ASR text contains a motion phrase such as `左转15度`, `向右转二十度`, `抬头10度`, `低头五度`, or `请回正`, the server queues a `motion` command back to the same device and does not queue TTS repeat speech. `请回正` maps to `{"type": "center"}` so horizontal and vertical servos return to their initial position.
-
-When ASR text contains a face phrase such as `切换到平静表情`, `开心`, `说话动作`, `害羞表情`, `眯眼笑`, `爱心`, `眨眼`, or `思考`, the server queues a `face` command and does not queue TTS repeat speech. `开心` maps to `happy_squint`; `眯眼笑` maps to `happy_squint_soft`; `爱心` maps to `heart_action`; `眨眼` maps to `wink`; `思考` maps to `thinking`; `说话动作` maps to the `speak` animation, which loops between `speak1` and `speak2`:
-
-```json
-{
-  "type": "stt",
-  "text": "切换到开心表情",
-  "handled_as": "face",
-  "face": {"expression": "happy_squint"},
-  "queued_command": "cmd_abc123"
+  "handled_as": "openclaw_forwarded",
+  "dialog_awake": true,
+  "openclaw_enabled": true,
+  "openclaw_sent": true,
+  "queued_commands": []
 }
 ```
 
