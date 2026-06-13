@@ -101,6 +101,63 @@ curl -G 'http://127.0.0.1:8091/command/move' \
   --data-urlencode 'type=center'
 ```
 
+## Visual Tracking
+
+When Xiaopai uploads a camera frame to `POST /upload-image`, the server runs YuNet face detection locally. If the largest face is outside the configured deadzone, the server queues a `motion` command for the uploading device.
+
+To ask an online Xiaopai device to take one photo and start this flow:
+
+```http
+GET /command/capture_image?device_id=<optional>
+GET /command/track_once?device_id=<optional>
+```
+
+Example:
+
+```bash
+curl 'http://127.0.0.1:8091/command/capture_image'
+```
+
+The response includes:
+
+```json
+{
+  "face_detection": {
+    "backend": "yunet",
+    "best_face": {
+      "center": {"x": 180.0, "y": 110.0},
+      "confidence": 0.92
+    }
+  },
+  "visual_tracking": {
+    "status": "queued",
+    "cmd_id": "cmd_xxxxxxxxxxxx",
+    "error": {"x": 20.0, "y": -18.0}
+  }
+}
+```
+
+Useful startup arguments:
+
+```text
+--visual-tracking-enabled / --no-visual-tracking-enabled
+--visual-tracking-deadzone-px 20
+--visual-tracking-gain-x 1.0
+--visual-tracking-gain-y 1.0
+--visual-tracking-max-degree 12
+--visual-tracking-min-interval-ms 350
+--visual-tracking-max-pending 2
+--visual-tracking-invert-x / --no-visual-tracking-invert-x
+--visual-tracking-invert-y / --no-visual-tracking-invert-y
+--find-owner-gain-x 1.0
+--find-owner-gain-y 0.8
+--find-owner-stop-pixels 32
+```
+
+`--visual-tracking-gain-x` controls left/right sensitivity for normal `/upload-image` auto-tracking, and `--visual-tracking-gain-y` controls up/down sensitivity.
+
+`find_owner` uploads frames with `X-Visual-Tracking: false`, so wake-up owner finding uses the `--find-owner-*` startup arguments that the server sends in the command payload. `--find-owner-gain-x` is the horizontal movement multiplier for the wake-up owner-finding path. Horizontal and vertical find-owner movement no longer has a per-step degree cap; only the final servo angle range is clamped by the firmware.
+
 ## Sequence
 
 Queue multiple actions in order.
@@ -115,10 +172,16 @@ The payload is a JSON array. Supported step types:
 [
   {"type": "face", "expression": "thinking"},
   {"type": "move", "action": "left", "degree": 15, "duration_ms": 500},
+  {"type": "find_owner", "rounds": 1, "reply": "我在"},
+  {"type": "volume", "direction": "up", "step": 10},
   {"type": "speak", "text": "我往左看一下。"},
   {"type": "face", "expression": "happy_squint"}
 ]
 ```
+
+Voice recognition also maps phrases containing `声音` plus `大` or `小` to a volume command. The firmware stores
+speaker volume as 10-100, maps it to the M5 speaker's 0-255 range, changes it by 10 each time, then replies
+`已经将声音调到XXX`. If the phrase also contains `最`, `声音最大` sets 100 and `声音最小` sets 10.
 
 Example:
 

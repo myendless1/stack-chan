@@ -9,6 +9,21 @@ VENV="${STACKCHAN_SERVER_VENV:-.venv}"
 LOG_FILE="${STACKCHAN_SERVER_LOG:-/tmp/stack-chan-server.log}"
 PIP_INDEX_URL="${STACKCHAN_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 PIP_TRUSTED_HOST="${STACKCHAN_PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
+DEBUG="${STACKCHAN_DEBUG:-0}"
+SERVER_ARGS=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    *)
+      SERVER_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
 
 if [ -f .env ]; then
   set -a
@@ -65,16 +80,23 @@ fi
 
 echo
 echo "Xiaopai Server"
-echo "  ASR upload:   http://$HOST:$PORT/upload"
-echo "  TTS stream:   http://$HOST:$PORT/stream-speak?text=..."
-echo "  Image upload: http://$HOST:$PORT/upload-image"
-echo "  health:       http://127.0.0.1:$PORT/health"
 echo "  log:          $LOG_FILE"
-echo
-echo "Firmware config examples:"
-echo "  CONFIG_STACKCHAN_RECORD_UPLOAD_URL = http://<this-computer-lan-ip>:$PORT/upload"
-echo "  CONFIG_STACKCHAN_STREAM_TTS_URL    = http://<this-computer-lan-ip>:$PORT/stream-speak"
-echo "  CONFIG_STACKCHAN_IMAGE_UPLOAD_URL  = http://<this-computer-lan-ip>:$PORT/upload-image"
+if [ "$DEBUG" = "1" ] || [ "$DEBUG" = "true" ]; then
+  DEBUG_ARGS=(--debug)
+  echo "  debug:        enabled"
+  echo "  ASR upload:   http://$HOST:$PORT/upload"
+  echo "  TTS stream:   http://$HOST:$PORT/stream-speak?text=..."
+  echo "  Image upload: http://$HOST:$PORT/upload-image"
+  echo "  health:       http://127.0.0.1:$PORT/health"
+  echo
+  echo "Firmware config examples:"
+  echo "  CONFIG_STACKCHAN_RECORD_UPLOAD_URL = http://<this-computer-lan-ip>:$PORT/upload"
+  echo "  CONFIG_STACKCHAN_STREAM_TTS_URL    = http://<this-computer-lan-ip>:$PORT/stream-speak"
+  echo "  CONFIG_STACKCHAN_IMAGE_UPLOAD_URL  = http://<this-computer-lan-ip>:$PORT/upload-image"
+else
+  DEBUG_ARGS=()
+  echo "  debug:        disabled (run ./start.sh --debug for device IDs, task IDs, IPs, ports, and full API bodies)"
+fi
 echo
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -83,6 +105,8 @@ echo "---- stack-chan-server start $(date '+%Y-%m-%d %H:%M:%S') ----" >> "$LOG_F
 PYTHONUNBUFFERED=1 "$VENV/bin/python" src/server.py \
   --host "$HOST" \
   --port "$PORT" \
+  "${DEBUG_ARGS[@]}" \
+  "${SERVER_ARGS[@]}" \
   2>&1 | tee -a "$LOG_FILE" &
 
 echo "Use \`pkill -f -9 server.py\` to stop the server."

@@ -45,6 +45,8 @@ void run_camera_upload_app();
 void run_tracking_user_demo();
 static bool wifi_is_connected();
 static void show_expression(const char* expression);
+static bool execute_speak_command(const char* text);
+static bool execute_speak_command_internal(const char* text, bool pause_voice_listener);
 
 extern const uint8_t calm_face_png_start[] asm("_binary_calm_face_png_start");
 extern const uint8_t calm_face_png_end[] asm("_binary_calm_face_png_end");
@@ -108,6 +110,7 @@ static constexpr int kSilenceStopMs = CONFIG_STACKCHAN_SILENCE_STOP_MS;
 static constexpr int kTtsStreamSampleRate = 16000;
 static constexpr size_t kTtsStreamBufferSamples = 2048;
 static constexpr int kLauncherAppCount = 5;
+static constexpr bool kShowAppStatusScreens = false;
 static constexpr uint32_t kWifiTaskStackBytes = 8 * 1024;
 static constexpr uint32_t kApp1TaskStackBytes = 24 * 1024;
 static constexpr uint32_t kApp2TaskStackBytes = 16 * 1024;
@@ -117,6 +120,7 @@ static constexpr uint32_t kTrackingTaskStackBytes = 20 * 1024;
 static constexpr size_t kTtsMaxBytes = CONFIG_STACKCHAN_TTS_MAX_BYTES;
 static constexpr int kCameraWidth = 320;
 static constexpr int kCameraHeight = 240;
+static constexpr int kCameraFreshDiscardFrames = 2;
 static constexpr float kTrackingCx = 160.0f;
 static constexpr float kTrackingCy = 120.0f;
 static constexpr float kTrackingFx = 364.0f;
@@ -125,6 +129,11 @@ static constexpr float kTrackingYawGain = 0.75f;
 static constexpr float kTrackingPitchGain = 0.90f;
 static constexpr float kTrackingYawDirection = 1.0f;
 static constexpr float kTrackingPitchDirection = -1.0f;
+static constexpr float kFindOwnerYawGain = 0.45f;
+static constexpr float kFindOwnerPitchGain = 0.55f;
+static constexpr float kFindOwnerYawDirection = 1.0f;
+static constexpr float kFindOwnerPitchDirection = -1.0f;
+static constexpr float kFindOwnerStopPixels = 32.0f;
 static constexpr int kTrackingScanStepCount = 5;
 static constexpr int kTrackingRefineRounds = 3;
 static constexpr float kTrackingStopPixels = 16.0f;
@@ -135,6 +144,7 @@ static constexpr float kTrackingPitchMaxDeg = 90.0f;
 static constexpr float kTrackingHomePitchDeg = 45.0f;
 static constexpr float kTrackingScanYawDeg = 25.0f;
 static constexpr float kTrackingScanPitchDeltaDeg = 20.0f;
+static constexpr int kFindOwnerMaxRounds = 3;
 static constexpr float kPi = 3.14159265358979323846f;
 static constexpr uart_port_t kServoUart = UART_NUM_1;
 static constexpr int kServoTxPin = 6;
@@ -166,6 +176,9 @@ static constexpr int16_t kHeadTouchSwipeThreshold = 40;
 static constexpr uint32_t kHeadTouchTaskStackBytes = 6 * 1024;
 static constexpr uint32_t kHeadTouchAudioTaskStackBytes = 16 * 1024;
 static constexpr uint32_t kSpeakerDrainMs = 500;
+static constexpr int kSpeakerVolumePercentMin = 10;
+static constexpr int kSpeakerVolumePercentMax = 100;
+static constexpr int kSpeakerVolumeDefaultStep = 10;
 
 static void configure_speaker_for_tts()
 {
@@ -209,8 +222,11 @@ volatile bool expression_animation_running = false;
 bool camera_initialized = false;
 volatile bool camera_owns_internal_i2c = false;
 bool servo_uart_initialized = false;
+bool servo_power_ready = false;
 float tracking_yaw_deg = 0.0f;
 float tracking_pitch_deg = kTrackingHomePitchDeg;
+int speaker_volume_percent =
+    std::max(kSpeakerVolumePercentMin, std::min(kSpeakerVolumePercentMax, (CONFIG_STACKCHAN_TTS_VOLUME * 100 + 127) / 255));
 char client_id[37] = {};
 std::string active_wifi_ssid = CONFIG_STACKCHAN_WIFI_SSID;
 std::string active_server_base = "http://192.168.21.15:8091";
@@ -413,6 +429,12 @@ void draw_header(const char* title)
 
 void draw_launcher()
 {
+    if (!kShowAppStatusScreens) {
+        if (!expression_screen_visible) {
+            show_expression(kDefaultExpression);
+        }
+        return;
+    }
     mark_expression_screen_dirty();
     auto& display = M5.Display;
     display.fillScreen(TFT_BLACK);
@@ -519,6 +541,9 @@ void draw_wifi_setup_steps(const char* ap_ssid)
 
 void draw_app1_status()
 {
+    if (!kShowAppStatusScreens) {
+        return;
+    }
     auto& display = M5.Display;
     draw_header("Voice to Text");
 
@@ -537,6 +562,9 @@ void draw_app1_status()
 
 void draw_tts_status()
 {
+    if (!kShowAppStatusScreens) {
+        return;
+    }
     auto& display = M5.Display;
     draw_header("Aliyun PCM TTS");
 
@@ -555,6 +583,9 @@ void draw_tts_status()
 
 void draw_camera_status()
 {
+    if (!kShowAppStatusScreens) {
+        return;
+    }
     auto& display = M5.Display;
     draw_header("Camera Upload");
 
@@ -573,6 +604,9 @@ void draw_camera_status()
 
 void draw_tracking_status()
 {
+    if (!kShowAppStatusScreens) {
+        return;
+    }
     auto& display = M5.Display;
     draw_header("Tracking User");
 
@@ -591,6 +625,9 @@ void draw_tracking_status()
 
 void show_recognition_text(const char* title, const char* text)
 {
+    if (!kShowAppStatusScreens) {
+        return;
+    }
     auto& display = M5.Display;
     draw_header(title);
 
@@ -622,7 +659,7 @@ void set_app1_status(const char* stage, const char* line1, const char* line2 = "
     app1_status.success = success;
     ESP_LOGI(TAG, "APP1 status: %s | %s | %s | %s", app1_status.stage, app1_status.line1, app1_status.line2,
              app1_status.line3);
-    if (voice_status_screen_suppressed) {
+    if (voice_status_screen_suppressed || !kShowAppStatusScreens) {
         return;
     }
     M5Lock lock;
@@ -655,7 +692,7 @@ void set_tts_status(const char* stage, const char* line1, const char* line2 = ""
     tts_status.success = success;
     ESP_LOGI(TAG, "TTS status: %s | %s | %s | %s", tts_status.stage, tts_status.line1, tts_status.line2,
              tts_status.line3);
-    if (voice_status_screen_suppressed) {
+    if (voice_status_screen_suppressed || !kShowAppStatusScreens) {
         return;
     }
     M5Lock lock;
@@ -673,6 +710,9 @@ void set_camera_status(const char* stage, const char* line1, const char* line2 =
     camera_status.success = success;
     ESP_LOGI(TAG, "Camera status: %s | %s | %s | %s", camera_status.stage, camera_status.line1, camera_status.line2,
              camera_status.line3);
+    if (!kShowAppStatusScreens) {
+        return;
+    }
     M5Lock lock;
     draw_camera_status();
 }
@@ -688,6 +728,9 @@ void set_tracking_status(const char* stage, const char* line1, const char* line2
     tracking_status.success = success;
     ESP_LOGI(TAG, "Tracking status: %s | %s | %s | %s", tracking_status.stage, tracking_status.line1, tracking_status.line2,
              tracking_status.line3);
+    if (!kShowAppStatusScreens) {
+        return;
+    }
     M5Lock lock;
     draw_tracking_status();
 }
@@ -764,6 +807,12 @@ const char* touch_state_name(const m5::Touch_Class::touch_detail_t& touch)
 
 void draw_touch_status(const char* event_name, const m5::Touch_Class::touch_detail_t& touch)
 {
+    if (!kShowAppStatusScreens) {
+        if (!expression_screen_visible) {
+            show_expression(kDefaultExpression);
+        }
+        return;
+    }
     auto& display = M5.Display;
     draw_header("APP2 Touch Events");
 
@@ -2756,6 +2805,48 @@ static void run_local_record_upload_loop()
     M5.Mic.end();
 }
 
+static void pause_voice_listener_for_shared_peripherals(const char* reason)
+{
+    voice_listener_paused = true;
+    ESP_LOGI(TAG, "Voice listener pause requested: %s", reason != nullptr ? reason : "shared peripheral use");
+
+    const int max_wait_ms = 2500;
+    int waited_ms = 0;
+    while (xiaozhi_task_handle != nullptr && M5.Mic.isEnabled() && waited_ms < max_wait_ms) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        waited_ms += 20;
+    }
+
+    if (M5.Mic.isEnabled()) {
+        ESP_LOGW(TAG, "Voice listener did not release mic in %dms; forcing mic end", max_wait_ms);
+        while (M5.Mic.isRecording()) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        M5.Mic.end();
+    }
+}
+
+static void resume_voice_listener_after_shared_peripherals()
+{
+    voice_listener_paused = false;
+}
+
+class VoiceListenerPauseGuard {
+public:
+    explicit VoiceListenerPauseGuard(const char* reason)
+    {
+        pause_voice_listener_for_shared_peripherals(reason);
+    }
+
+    ~VoiceListenerPauseGuard()
+    {
+        resume_voice_listener_after_shared_peripherals();
+    }
+
+    VoiceListenerPauseGuard(const VoiceListenerPauseGuard&) = delete;
+    VoiceListenerPauseGuard& operator=(const VoiceListenerPauseGuard&) = delete;
+};
+
 static void run_xiaozhi_speech_loop()
 {
     if (xiaozhi_config.websocket_url.empty() || xiaozhi_config.websocket_token.empty()) {
@@ -2879,6 +2970,14 @@ static std::string make_stream_tts_url_for_text(const char* text)
     return url;
 }
 
+static std::string make_event_audio_url(const char* name)
+{
+    std::string url = make_server_url("/event-audio/");
+    url += url_encode(name != nullptr ? name : "");
+    url += ".pcm";
+    return url;
+}
+
 static std::string make_stream_tts_url()
 {
     return make_stream_tts_url_for_text(CONFIG_STACKCHAN_TTS_TEXT);
@@ -2915,7 +3014,7 @@ static bool init_camera_once()
     config.jpeg_quality = 0;
     config.fb_count = 2;
     config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.grab_mode = CAMERA_GRAB_LATEST;
     config.sccb_i2c_port = -1;
 
     set_tracking_status("Camera", "Initializing GC0308", "QVGA RGB565", "");
@@ -2951,6 +3050,24 @@ static void release_camera_driver()
     camera_owns_internal_i2c = false;
 }
 
+static camera_fb_t* get_fresh_camera_frame(const char* context)
+{
+    for (int i = 0; i < kCameraFreshDiscardFrames; ++i) {
+        camera_fb_t* stale = esp_camera_fb_get();
+        if (stale == nullptr) {
+            ESP_LOGW(TAG, "Camera stale-frame flush failed context=%s index=%d", context != nullptr ? context : "",
+                     i + 1);
+            break;
+        }
+        ESP_LOGI(TAG, "Camera stale-frame flushed context=%s index=%d len=%u", context != nullptr ? context : "",
+                 i + 1, static_cast<unsigned>(stale->len));
+        esp_camera_fb_return(stale);
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+    vTaskDelay(pdMS_TO_TICKS(80));
+    return esp_camera_fb_get();
+}
+
 struct FaceTarget {
     bool found = false;
     float center_x = 0.0f;
@@ -2975,6 +3092,17 @@ struct ScanCandidate {
 static float clamp_float(float value, float min_value, float max_value)
 {
     return std::max(min_value, std::min(max_value, value));
+}
+
+static int speaker_volume_raw_from_percent(int percent)
+{
+    int clamped = std::max(kSpeakerVolumePercentMin, std::min(kSpeakerVolumePercentMax, percent));
+    return std::max(0, std::min(255, (clamped * 255 + 50) / 100));
+}
+
+static void apply_speaker_volume()
+{
+    M5.Speaker.setVolume(speaker_volume_raw_from_percent(speaker_volume_percent));
 }
 
 static uint8_t scs_checksum(const uint8_t* data, size_t length_without_checksum)
@@ -3074,16 +3202,25 @@ static bool py32_write_bit(uint8_t low_reg, uint8_t high_reg, uint8_t pin, bool 
 
 static void enable_servo_power()
 {
+    if (servo_power_ready) {
+        return;
+    }
+    if (camera_owns_internal_i2c) {
+        ESP_LOGW(TAG, "Cannot enable servo power while camera owns internal I2C");
+        return;
+    }
     M5Lock lock;
     uint8_t version = M5.In_I2C.readRegister8(kPy32Address, 0x02, kPy32I2cFreq);
     if (version == 0 || version == 0xff) {
         ESP_LOGW(TAG, "PY32 IO expander not detected; servo power may already be on");
+        servo_power_ready = true;
         return;
     }
     py32_write_bit(0x03, 0x04, kPy32ServoPowerPin, true);  // direction output
     py32_write_bit(0x0b, 0x0c, kPy32ServoPowerPin, false); // pull-down off
     py32_write_bit(0x09, 0x0a, kPy32ServoPowerPin, true);  // pull-up on
     py32_write_bit(0x05, 0x06, kPy32ServoPowerPin, true);  // power on
+    servo_power_ready = true;
     ESP_LOGI(TAG, "Servo power enabled via PY32 version=0x%02x", version);
 }
 
@@ -3228,6 +3365,7 @@ static bool upload_tracking_frame(const camera_fb_t* frame, FaceTarget* target)
     esp_http_client_set_header(client, "X-Image-Height", height);
     esp_http_client_set_header(client, "X-Device-Id", mac_address().c_str());
     esp_http_client_set_header(client, "X-Client-Id", client_id);
+    esp_http_client_set_header(client, "X-Visual-Tracking", "false");
 
     esp_err_t err = esp_http_client_open(client, frame->len);
     if (err != ESP_OK) {
@@ -3408,7 +3546,7 @@ static bool capture_face_at_pose(const ScanPose& pose, int step_index, int step_
     }
 
     set_tracking_status("Capturing", pose.label, "Detecting face via server", "");
-    camera_fb_t* frame = esp_camera_fb_get();
+    camera_fb_t* frame = get_fresh_camera_frame("scan");
     if (frame == nullptr) {
         set_tracking_status("Capture Fail", "esp_camera_fb_get failed", "", "", false, false);
         ESP_LOGE(TAG, "esp_camera_fb_get failed");
@@ -3458,7 +3596,7 @@ static bool capture_face_at_current_pose(const char* stage, const char* line1, c
     }
 
     set_tracking_status(stage, line1, line2, "");
-    camera_fb_t* frame = esp_camera_fb_get();
+    camera_fb_t* frame = get_fresh_camera_frame("find_owner");
     if (frame == nullptr) {
         set_tracking_status("Capture Fail", "esp_camera_fb_get failed", "", "", false, false);
         ESP_LOGE(TAG, "esp_camera_fb_get failed");
@@ -3468,8 +3606,78 @@ static bool capture_face_at_current_pose(const char* stage, const char* line1, c
 
     bool detected = upload_tracking_frame(frame, target);
     esp_camera_fb_return(frame);
-    release_camera_driver();
     return detected;
+}
+
+static bool refine_head_toward_face(const FaceTarget& target, uint16_t duration_ms, float gain_x, float gain_y)
+{
+    float dx = target.center_x - kTrackingCx;
+    float dy = target.center_y - kTrackingCy;
+    float yaw_delta_deg = std::atan(dx / kTrackingFx) * 180.0f / kPi;
+    float pitch_delta_deg = std::atan(dy / kTrackingFy) * 180.0f / kPi;
+    float yaw_step = yaw_delta_deg * gain_x * kFindOwnerYawDirection;
+    float pitch_step = pitch_delta_deg * gain_y * kFindOwnerPitchDirection;
+    float next_yaw = tracking_yaw_deg + yaw_step;
+    float next_pitch = tracking_pitch_deg + pitch_step;
+    ESP_LOGI(TAG, "Find owner adjust face=(%.1f,%.1f) dx=%.1f dy=%.1f step=(%.1f,%.1f) next=(%.1f,%.1f)",
+             target.center_x, target.center_y, dx, dy, yaw_step, pitch_step, next_yaw, next_pitch);
+    return move_head_to_tracking_angles(next_yaw, next_pitch, duration_ms);
+}
+
+static bool run_find_owner_command(int rounds, const char* reply, float gain_x = kFindOwnerYawGain,
+                                   float gain_y = kFindOwnerPitchGain, float stop_pixels = kFindOwnerStopPixels)
+{
+    ensure_client_id();
+    if (!ensure_wifi_connected()) {
+        return false;
+    }
+    if (!ensure_server_selected()) {
+        return false;
+    }
+
+    VoiceListenerPauseGuard voice_pause("find owner");
+    M5.Speaker.stop();
+    M5.Speaker.end();
+
+    int capped_rounds = std::max(1, std::min(rounds, kFindOwnerMaxRounds));
+    gain_x = std::max(0.0f, gain_x);
+    gain_y = std::max(0.0f, gain_y);
+    stop_pixels = std::max(0.0f, stop_pixels);
+    bool saw_face = false;
+    bool aligned = false;
+    for (int round = 1; round <= capped_rounds; ++round) {
+        FaceTarget target;
+        char line1[48];
+        snprintf(line1, sizeof(line1), "round %d/%d", round, capped_rounds);
+        if (!capture_face_at_current_pose("Find Owner", line1, "Detecting face", &target)) {
+            vTaskDelay(pdMS_TO_TICKS(220));
+            continue;
+        }
+
+        saw_face = true;
+        float dx = target.center_x - kTrackingCx;
+        float dy = target.center_y - kTrackingCy;
+        float pixel_error = std::sqrt(dx * dx + dy * dy);
+        if (pixel_error <= stop_pixels) {
+            aligned = true;
+            ESP_LOGI(TAG, "Find owner aligned: err=%.1f", pixel_error);
+            break;
+        }
+
+        if (round == capped_rounds && capped_rounds > 1) {
+            ESP_LOGI(TAG, "Find owner reached final capture: err=%.1f, skip final adjustment", pixel_error);
+            break;
+        }
+
+        if (!refine_head_toward_face(target, 520, gain_x, gain_y)) {
+            set_tracking_status("Servo Fail", "Find-owner move failed", "Check ID/wiring", "", false, false);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(650));
+    }
+
+    ESP_LOGI(TAG, "Find owner finished: saw_face=%d aligned=%d", saw_face, aligned);
+    return execute_speak_command_internal(reply != nullptr && reply[0] != '\0' ? reply : "我在", false);
 }
 
 void run_camera_upload_app()
@@ -3482,10 +3690,7 @@ void run_camera_upload_app()
         return;
     }
 
-    while (M5.Mic.isRecording()) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    M5.Mic.end();
+    VoiceListenerPauseGuard voice_pause("camera upload");
     M5.Speaker.stop();
     M5.Speaker.end();
 
@@ -3495,7 +3700,7 @@ void run_camera_upload_app()
     }
 
     set_camera_status("Capturing", "Taking photo", "Uploading follows");
-    camera_fb_t* frame = esp_camera_fb_get();
+    camera_fb_t* frame = get_fresh_camera_frame("capture_image");
     if (frame == nullptr) {
         set_camera_status("Capture Fail", "esp_camera_fb_get failed", "", "", false, false);
         ESP_LOGE(TAG, "esp_camera_fb_get failed");
@@ -3518,10 +3723,7 @@ void run_tracking_user_demo()
         return;
     }
 
-    while (M5.Mic.isRecording()) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    M5.Mic.end();
+    VoiceListenerPauseGuard voice_pause("tracking demo");
     M5.Speaker.stop();
     M5.Speaker.end();
 
@@ -3630,7 +3832,7 @@ void run_tracking_user_demo()
         char round_line[48];
         snprintf(round_line, sizeof(round_line), "round %d/%d", round, kTrackingMaxRounds);
         set_tracking_status("Capturing", round_line, "Detecting face via server", "");
-        camera_fb_t* frame = esp_camera_fb_get();
+        camera_fb_t* frame = get_fresh_camera_frame("tracking_loop");
         if (frame == nullptr) {
             set_tracking_status("Capture Fail", "esp_camera_fb_get failed", "", "", false, false);
             ESP_LOGE(TAG, "esp_camera_fb_get failed");
@@ -3853,6 +4055,13 @@ static bool stream_tts_pcm_for_text(const char* text)
     return stream_pcm_url(url, text, true);
 }
 
+static bool stream_cached_reply_pcm(const char* cache_name, const char* label)
+{
+    std::string url = make_event_audio_url(cache_name);
+    ESP_LOGI(TAG, "Stream cached reply URL: %s", url.c_str());
+    return stream_pcm_url(url, label, false);
+}
+
 static bool stream_tts_pcm()
 {
     return stream_tts_pcm_for_text(CONFIG_STACKCHAN_TTS_TEXT);
@@ -3878,7 +4087,7 @@ void run_stream_tts_demo()
         ESP_LOGE(TAG, "M5.Speaker.begin failed");
         return;
     }
-    M5.Speaker.setVolume(CONFIG_STACKCHAN_TTS_VOLUME);
+    apply_speaker_volume();
     stream_tts_pcm();
 }
 
@@ -4083,18 +4292,13 @@ static void stop_speaking_animation()
     show_expression(kDefaultExpression);
 }
 
-static bool execute_speak_command(const char* text)
+static bool execute_speak_command_internal(const char* text, bool pause_voice_listener)
 {
     if (text == nullptr || text[0] == '\0') {
         return true;
     }
 
-    voice_listener_paused = true;
-    vTaskDelay(pdMS_TO_TICKS(160));
-    while (M5.Mic.isRecording()) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    M5.Mic.end();
+    VoiceListenerPauseGuard* voice_pause = pause_voice_listener ? new VoiceListenerPauseGuard("speak command") : nullptr;
 
     if (audio_mutex != nullptr) {
         xSemaphoreTake(audio_mutex, portMAX_DELAY);
@@ -4104,21 +4308,63 @@ static bool execute_speak_command(const char* text)
         if (audio_mutex != nullptr) {
             xSemaphoreGive(audio_mutex);
         }
-        voice_listener_paused = false;
+        delete voice_pause;
         return false;
     }
-    M5.Speaker.setVolume(CONFIG_STACKCHAN_TTS_VOLUME);
+    apply_speaker_volume();
     app2_stop_requested = false;
     M5.Speaker.stop();
     start_speaking_animation();
-    bool ok = stream_tts_pcm_for_text(text);
+    bool ok = strcmp(text, "我在") == 0 ? stream_cached_reply_pcm("wake_reply", text) : stream_tts_pcm_for_text(text);
     M5.Speaker.end();
     stop_speaking_animation();
     if (audio_mutex != nullptr) {
         xSemaphoreGive(audio_mutex);
     }
-    voice_listener_paused = false;
+    delete voice_pause;
     return ok;
+}
+
+static bool execute_speak_command(const char* text)
+{
+    return execute_speak_command_internal(text, true);
+}
+
+static bool execute_volume_command(const cJSON* payload)
+{
+    std::string mode = json_string_value(payload, "mode");
+    std::string direction = json_string_value(payload, "direction");
+    if (direction.empty()) {
+        direction = json_string_value(payload, "action");
+    }
+    if (direction.empty()) {
+        direction = json_string_value(payload, "type");
+    }
+
+    int step = static_cast<int>(json_number_value(payload, "step", kSpeakerVolumeDefaultStep));
+    if (step <= 0) {
+        step = kSpeakerVolumeDefaultStep;
+    }
+
+    const cJSON* value = cJSON_GetObjectItemCaseSensitive(payload, "value");
+    if (mode == "set" || cJSON_IsNumber(value)) {
+        speaker_volume_percent = static_cast<int>(json_number_value(payload, "value", speaker_volume_percent));
+    } else if (direction == "down" || direction == "lower" || direction == "small" || direction == "quiet") {
+        speaker_volume_percent -= step;
+    } else {
+        speaker_volume_percent += step;
+    }
+    speaker_volume_percent =
+        std::max(kSpeakerVolumePercentMin, std::min(kSpeakerVolumePercentMax, speaker_volume_percent));
+
+    char reply[64];
+    snprintf(reply, sizeof(reply), "已经将声音调到%d", speaker_volume_percent);
+    ESP_LOGI(TAG, "Speaker volume adjusted: percent=%d raw=%d", speaker_volume_percent,
+             speaker_volume_raw_from_percent(speaker_volume_percent));
+    if (!execute_speak_command(reply)) {
+        ESP_LOGW(TAG, "Speaker volume reply failed after adjustment");
+    }
+    return true;
 }
 
 static const char* head_touch_event_name(HeadTouchEvent event)
@@ -4328,6 +4574,24 @@ static bool execute_command_object(const cJSON* command)
         std::string text = json_string_value(payload, "text");
         return execute_speak_command(text.c_str());
     }
+    if (type == "volume" || type == "sound") {
+        return execute_volume_command(payload);
+    }
+    if (type == "capture_image" || type == "track_once" || type == "camera") {
+        run_camera_upload_app();
+        return true;
+    }
+    if (type == "find_owner" || type == "locate_owner") {
+        int rounds = static_cast<int>(json_number_value(payload, "rounds", kFindOwnerMaxRounds));
+        float gain_x = static_cast<float>(json_number_value(payload, "gain_x", kFindOwnerYawGain));
+        float gain_y = static_cast<float>(json_number_value(payload, "gain_y", kFindOwnerPitchGain));
+        float stop_pixels = static_cast<float>(json_number_value(payload, "stop_pixels", kFindOwnerStopPixels));
+        std::string reply = json_string_value(payload, "reply");
+        if (reply.empty()) {
+            reply = "我在";
+        }
+        return run_find_owner_command(rounds, reply.c_str(), gain_x, gain_y, stop_pixels);
+    }
     if (type == "motion" || type == "move") {
         std::string motion_type = json_string_value(payload, "type");
         if (motion_type == "motion" || motion_type == "move") {
@@ -4415,7 +4679,11 @@ static bool handle_command_response(const std::string& response)
     ESP_LOGI(TAG, "Command received: id=%s type=%s", cmd_id.c_str(), cmd_type.c_str());
     send_command_ack(cmd_id.c_str(), "received");
     bool ok = execute_command_object(command);
-    send_command_ack(cmd_id.c_str(), ok ? "done" : "failed");
+    char message[96] = {};
+    if (!ok) {
+        snprintf(message, sizeof(message), "command execution failed: %s", cmd_type.c_str());
+    }
+    send_command_ack(cmd_id.c_str(), ok ? "done" : "failed", message);
     cJSON_Delete(root);
     return ok;
 }
@@ -4459,6 +4727,12 @@ static void start_background_services()
         }
 
         show_expression(kDefaultExpression);
+        enable_servo_power();
+        if (init_camera_once()) {
+            ESP_LOGI(TAG, "Camera pre-initialized for find-owner flow");
+        } else {
+            ESP_LOGW(TAG, "Camera pre-initialization failed; will retry on demand");
+        }
         current_app = AppId::VoiceDemo;
         voice_status_screen_suppressed = true;
         start_head_touch_services();

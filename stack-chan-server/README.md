@@ -10,6 +10,7 @@ Local bridge server for the Xiaopai firmware in this repository. It keeps cloud 
 - Camera upload receiver for Xiaopai RGB565 frames.
 - RGB565 conversion to PNG and BMP. The Xiaopai camera data is decoded as big-endian RGB565.
 - Local CPU face/head detection using OpenCV YuNet. Detected boxes are returned in the `/upload-image` response and saved as `*.faces.jpg` visualizations.
+- Visual tracking loop: `/upload-image` can turn the largest detected face into queued Xiaopai head-motion commands.
 - Legacy local open-source STT/TTS utilities are kept under `legacy/`.
 
 ## Setup
@@ -29,6 +30,12 @@ EOF
 ```
 
 The server can also use `ALIYUN_NLS_TOKEN` directly. With `ALIYUN_AK_ID` and `ALIYUN_AK_SECRET`, it creates and refreshes the NLS token automatically. The default ASR/TTS/command server uses only Python standard library modules.
+
+By default, logs are concise and omit device IDs, task IDs, client IPs, ports, and full API bodies. Start with debug logging only when you need those details:
+
+```bash
+./start.sh --debug
+```
 
 YuNet face detection uses OpenCV and the small ONNX checkpoint in `models/`. `start.sh` installs the YuNet dependencies automatically. To install them manually:
 
@@ -98,6 +105,11 @@ curl -G 'http://127.0.0.1:8091/command/motion' \
 curl -G 'http://127.0.0.1:8091/command/sequence' \
   --data-urlencode 'expression=thinking' \
   --data-urlencode 'text=让我想一下这个问题。'
+
+curl -G 'http://127.0.0.1:8091/command/find_owner' \
+  --data-urlencode 'rounds=1' \
+  --data-urlencode 'reply=我在' \
+  --data-urlencode 'interrupt=true'
 ```
 
 `POST /command`
@@ -110,10 +122,15 @@ Queues the full command schema as JSON:
   "payload": [
     {"type": "face", "expression": "thinking"},
     {"type": "motion", "pan": 15, "tilt": 45, "duration_ms": 400},
+    {"type": "find_owner", "rounds": 1, "reply": "我在"},
+    {"type": "volume", "direction": "up", "step": 10},
     {"type": "speak", "text": "让我想一下这个问题。"}
   ]
 }
 ```
+
+ASR phrases containing `声音` plus `大` or `小` adjust Xiaopai speaker volume by 10 on a 10-100 scale. If the phrase
+also contains `最`, `声音最大` sets 100 and `声音最小` sets 10. The device then replies `已经将声音调到XXX`.
 
 `POST /upload`
 
@@ -176,7 +193,38 @@ The server saves:
 - `*.bmp`: converted image
 - `*.faces.jpg`: YuNet face/head detection visualization, when dependencies are available
 
-Response includes `png_path`, `face_visual_path`, and `face_detection`. `face_detection.best_face.center` is the main field for visual tracking.
+Response includes `png_path`, `face_visual_path`, `face_detection`, and `visual_tracking`.
+`face_detection.best_face.center` is used to queue a head-motion command for the same `X-Device-Id` that uploaded the frame. The tracking loop uses a deadzone, horizontal/vertical gains, rate limit, and pending-command cap so high-frequency image uploads do not flood the device command queue.
+
+To test with the robot camera itself, first confirm the device is online with `GET /devices`, then queue a one-shot capture:
+
+```bash
+curl 'http://127.0.0.1:8091/command/capture_image'
+```
+
+The firmware also accepts `track_once` and `camera` as aliases. The capture command makes Xiaopai take one photo and upload it to `/upload-image`; YuNet detection and visual tracking run from that upload.
+
+Tune the face-position-to-head-motion ratio for normal `/upload-image` auto-tracking with server startup
+arguments:
+
+```bash
+./start.sh --visual-tracking-gain-x 1.0 --visual-tracking-gain-y 1.0
+```
+
+Increase `--visual-tracking-gain-x` if left/right motion is too small, and increase
+`--visual-tracking-gain-y` if up/down motion is too small.
+
+Wake-up owner finding (`find_owner`) suppresses server-side auto-tracking. Tune that path with:
+
+```bash
+./start.sh --find-owner-gain-x 1.0 --find-owner-gain-y 0.8
+```
+
+`--find-owner-gain-x` is the horizontal movement multiplier used after the wake word. Direction is still a
+firmware mounting constant: if Xiaopai moves left when the face is on the right, flip `kFindOwnerYawDirection`
+between `1.0f` and `-1.0f` in `main/main.cpp`. If up/down is reversed, flip `kFindOwnerPitchDirection`.
+Find-owner horizontal and vertical movement no longer has a per-step degree cap; only the final servo angle range
+is clamped by the firmware.
 
 ## Configuration
 

@@ -42,7 +42,21 @@ TOKEN_REFRESH_MARGIN_SECONDS = 300
 DEVICE_ONLINE_TTL_SECONDS = 90
 DIALOG_AWAKE_SECONDS = 60
 LOG_TEXT_MAX_CHARS = 2000
-DIALOG_WAKE_WORDS = ("小派同学", "小派同學", "小派", "xiaopai")
+DIALOG_WAKE_WORDS = (
+    "小派同学",
+    "小派同學",
+    "小派",
+    "小胖",
+    "小盼",
+    "小潘",
+    "小排",
+    "小白",
+    "小坏",
+    "小壞",
+    "小蔡",
+    "小外",
+    "xiaopai",
+)
 DIALOG_SLEEP_WORDS = (
     "退下",
     "退一下",
@@ -90,6 +104,7 @@ AVAILABLE_ACTIONS = (
 )
 
 HEAD_TOUCH_EVENT_TEXT = {
+    "wake_reply": "我在",
     "press": "按压",
     "click": "你好，我是小派同学",
     "swipe_forward": "你好，我是小派同学",
@@ -101,6 +116,14 @@ XIAOPAI_OPENCLAW_SYSTEM_PROMPT = """你会收到“小派同学”（用户终�
 这个服务端只负责把文本/事件转发给你，不会解析你的回复来控制机器人。
 如果需要让机器人说话、移动或切换表情，请主动调用小派服务端提供的 HTTP 控制 API。
 """
+
+
+def log_timestamp() -> str:
+    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def log_print(message: str, *, file=None) -> None:
+    print(f"[{log_timestamp()}] {message}", file=file or sys.stdout, flush=True)
 
 EXPRESSION_ALIASES = {
     "default": "calm",
@@ -389,6 +412,23 @@ def is_wake_only_text(text: str) -> bool:
     return not normalized
 
 
+def parse_voice_volume_command(text: str) -> dict | None:
+    normalized = normalize_voice_command_text(text)
+    if "声音" not in normalized:
+        return None
+    down_words = ("小", "轻", "低", "降低", "调低", "关小", "小点", "小一点")
+    up_words = ("大", "响", "高", "提高", "调高", "放大", "大点", "大一点")
+    if any(word in normalized for word in down_words):
+        if "最" in normalized:
+            return {"mode": "set", "value": 10, "source_text": text}
+        return {"direction": "down", "step": 10, "source_text": text}
+    if any(word in normalized for word in up_words):
+        if "最" in normalized:
+            return {"mode": "set", "value": 100, "source_text": text}
+        return {"direction": "up", "step": 10, "source_text": text}
+    return None
+
+
 def parse_voice_face_command(text: str) -> dict | None:
     normalized = normalize_voice_command_text(text)
     if not normalized:
@@ -453,8 +493,24 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     openclaw_timeout: int
     openclaw_max_completion_tokens: int
     openclaw_session_prefix: str
+    debug_log: bool
     face_detector_backend: str
     face_detector: YunetFaceService | None
+    visual_tracking_enabled: bool
+    visual_tracking_deadzone_px: float
+    visual_tracking_gain_x: float
+    visual_tracking_gain_y: float
+    visual_tracking_max_degree: float
+    visual_tracking_min_degree: float
+    visual_tracking_duration_ms: int
+    visual_tracking_min_interval_ms: int
+    visual_tracking_max_pending: int
+    visual_tracking_invert_x: bool
+    visual_tracking_invert_y: bool
+    visual_tracking_last_command_at: dict[str, float]
+    find_owner_gain_x: float
+    find_owner_gain_y: float
+    find_owner_stop_pixels: float
     device_queues: dict[str, Queue]
     last_ack: dict[str, dict]
     last_seen: dict[str, float]
@@ -467,12 +523,28 @@ class AliyunVoiceServer(ThreadingHTTPServer):
                 self.token, self.token_expire_time = create_aliyun_nls_token(
                     self.access_key_id, self.access_key_secret
                 )
-                print(f"Aliyun NLS token refreshed, expires_at={self.token_expire_time}", flush=True)
+                if getattr(self, "debug_log", False):
+                    log_print(f"Aliyun NLS token refreshed, expires_at={self.token_expire_time}")
+                else:
+                    log_print("Aliyun NLS token refreshed")
         return self.token
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "XiaopaiAliyunVoice/1.0"
+
+    def _debug_enabled(self) -> bool:
+        return bool(getattr(self.server, "debug_log", False))
+
+    def _log_info(self, message: str) -> None:
+        log_print(message)
+
+    def _log_debug(self, message: str) -> None:
+        if self._debug_enabled():
+            log_print(message)
+
+    def _log_error(self, message: str) -> None:
+        log_print(message, file=sys.stderr)
 
     def do_GET(self):
         path, query = self._path_query()
@@ -494,6 +566,24 @@ class Handler(BaseHTTPRequestHandler):
                     "face_detector": self.server.face_detector.status()
                     if self.server.face_detector is not None
                     else {"backend": self.server.face_detector_backend, "available": False},
+                    "visual_tracking": {
+                        "enabled": self.server.visual_tracking_enabled,
+                        "deadzone_px": self.server.visual_tracking_deadzone_px,
+                        "gain_x": self.server.visual_tracking_gain_x,
+                        "gain_y": self.server.visual_tracking_gain_y,
+                        "max_degree": self.server.visual_tracking_max_degree,
+                        "min_degree": self.server.visual_tracking_min_degree,
+                        "duration_ms": self.server.visual_tracking_duration_ms,
+                        "min_interval_ms": self.server.visual_tracking_min_interval_ms,
+                        "max_pending": self.server.visual_tracking_max_pending,
+                        "invert_x": self.server.visual_tracking_invert_x,
+                        "invert_y": self.server.visual_tracking_invert_y,
+                    },
+                    "find_owner": {
+                        "gain_x": self.server.find_owner_gain_x,
+                        "gain_y": self.server.find_owner_gain_y,
+                        "stop_pixels": self.server.find_owner_stop_pixels,
+                    },
                     "openclaw": {
                         "enabled": self._openclaw_enabled(),
                         "base_url": self.server.openclaw_base_url,
@@ -621,22 +711,26 @@ class Handler(BaseHTTPRequestHandler):
         self._mark_device_seen(device_id)
         sample_rate = detect_wav_sample_rate(body) or self.server.sample_rate
         audio_format = "wav" if detect_wav_sample_rate(body) else "pcm"
-        print(f"ASR upload: device={device_id} bytes={len(body)} format={audio_format} sample_rate={sample_rate}")
+        self._log_info(f"ASR upload received: {audio_format}, {len(body)} bytes")
+        self._log_debug(f"ASR upload detail: device={device_id} bytes={len(body)} format={audio_format} sample_rate={sample_rate}")
         try:
             result = self._aliyun_asr(body, audio_format, sample_rate)
         except Exception as exc:
-            print(f"ASR failed: {exc}", file=sys.stderr)
+            self._log_error(f"ASR failed: {exc}")
             self._send_json({"type": "error", "message": str(exc)}, HTTPStatus.BAD_GATEWAY)
             return
 
         text = result.get("result", "")
         status = result.get("status")
         message = result.get("message", "")
-        print(
-            "Speech recognition result: "
+        if text:
+            self._log_info(f"ASR recognized: {text!r}")
+        else:
+            self._log_info("ASR recognized no speech")
+        self._log_debug(
+            "ASR result detail: "
             f"device={device_id} status={status} task_id={result.get('task_id', '')!r} "
-            f"text={text!r} message={message!r}",
-            flush=True,
+            f"text={text!r} message={message!r}"
         )
         if status != 20000000:
             self._send_json({"type": "error", "message": message or f"Aliyun ASR status {status}"}, HTTPStatus.BAD_GATEWAY)
@@ -644,6 +738,17 @@ class Handler(BaseHTTPRequestHandler):
 
         response = {"type": "stt", "text": text, "task_id": result.get("task_id", ""), "device_id": device_id}
         if text:
+            volume_command = parse_voice_volume_command(text)
+            if volume_command is not None:
+                command = make_command("volume", volume_command, priority=1, interrupt=True)
+                self._enqueue_command(device_id, command)
+                response["handled_as"] = "volume_adjust"
+                response["dialog_awake"] = self._dialog_awake(device_id)
+                response["queued_command"] = command["cmd_id"]
+                response["volume_direction"] = volume_command["direction"]
+                self._send_json(response)
+                return
+
             if has_dialog_sleep_word(text):
                 self._sleep_dialog(device_id, reason=text)
                 response["handled_as"] = "sleep"
@@ -655,18 +760,30 @@ class Handler(BaseHTTPRequestHandler):
             if woke_by_word:
                 self._wake_dialog(device_id, reason=text)
                 response["woke_by"] = "wake_word"
+                command = make_command(
+                    "find_owner",
+                    {
+                        "rounds": 1,
+                        "reply": "我在",
+                        "gain_x": self.server.find_owner_gain_x,
+                        "gain_y": self.server.find_owner_gain_y,
+                        "stop_pixels": self.server.find_owner_stop_pixels,
+                    },
+                    priority=1,
+                    interrupt=True,
+                )
+                self._enqueue_command(device_id, command)
+                response["queued_command"] = command["cmd_id"]
                 if is_wake_only_text(text):
-                    command = make_command("speak", {"text": "我在"}, priority=1, interrupt=True)
-                    self._enqueue_command(device_id, command)
                     response["handled_as"] = "wake"
                     response["dialog_awake"] = True
-                    response["queued_command"] = command["cmd_id"]
                     self._send_json(response)
                     return
             elif not self._dialog_awake(device_id):
                 response["handled_as"] = "sleeping"
                 response["dialog_awake"] = False
-                print(f"ASR ignored while sleeping: device={device_id} text={text!r}", flush=True)
+                self._log_info("ASR ignored while sleeping")
+                self._log_debug(f"ASR sleeping detail: device={device_id} text={text!r}")
                 self._send_json(response)
                 return
             else:
@@ -682,7 +799,8 @@ class Handler(BaseHTTPRequestHandler):
             response["handled_as"] = "openclaw_forwarded" if openclaw_result.get("openclaw_sent") else "openclaw_not_sent"
         else:
             response["handled_as"] = "empty"
-            print(f"ASR empty, skip OpenClaw: device={device_id}", flush=True)
+            self._log_info("ASR empty; OpenClaw skipped")
+            self._log_debug(f"ASR empty detail: device={device_id}")
         self._send_json(response)
 
     def _handle_device_event(self, query: dict, posted: dict | None = None):
@@ -732,7 +850,8 @@ class Handler(BaseHTTPRequestHandler):
                     "queued_commands": [],
                 }
             )
-            print(f"Speech event empty, skip OpenClaw: device={device_id}", flush=True)
+            self._log_info("Speech event empty; OpenClaw skipped")
+            self._log_debug(f"Speech event empty detail: device={device_id}")
             return
 
         result = self._send_openclaw_event(device_id, str(event_type), details)
@@ -899,11 +1018,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def _enqueue_command(self, device_id: str, command: dict) -> None:
         device_id = safe_device_id(device_id)
-        self._queue_for(device_id).put(command)
+        queue = self._queue_for(device_id)
+        cleared = 0
+        if command.get("interrupt"):
+            while True:
+                try:
+                    queue.get_nowait()
+                    cleared += 1
+                except Empty:
+                    break
+        queue.put(command)
         detail = ""
         if command.get("type") == "face" and isinstance(command.get("payload"), dict):
             detail = f" expression={command['payload'].get('expression', '')}"
-        print(f"Command queued: device={device_id} cmd_id={command['cmd_id']} type={command['type']}{detail}", flush=True)
+        self._log_info(f"Command queued: {command['type']}{detail}")
+        self._log_debug(
+            f"Command queued detail: device={device_id} cmd_id={command['cmd_id']} "
+            f"type={command['type']}{detail} cleared={cleared}"
+        )
 
     def _mark_device_seen(self, device_id: str) -> None:
         device_id = safe_device_id(device_id)
@@ -928,16 +1060,15 @@ class Handler(BaseHTTPRequestHandler):
     def _wake_dialog(self, device_id: str, reason: str = "") -> None:
         device_id = safe_device_id(device_id)
         self.server.dialog_awake_until[device_id] = time.time() + DIALOG_AWAKE_SECONDS
-        print(
-            f"Dialog awake: device={device_id} ttl={DIALOG_AWAKE_SECONDS}s reason={reason!r}",
-            flush=True,
-        )
+        self._log_info("Dialog awake")
+        self._log_debug(f"Dialog awake detail: device={device_id} ttl={DIALOG_AWAKE_SECONDS}s reason={reason!r}")
 
     def _sleep_dialog(self, device_id: str, reason: str = "") -> None:
         device_id = safe_device_id(device_id)
         self.server.dialog_awake_until[device_id] = 0
         self._enqueue_command(device_id, make_command("face", {"expression": "calm"}, priority=1, interrupt=True))
-        print(f"Dialog sleep: device={device_id} reason={reason!r}", flush=True)
+        self._log_info("Dialog sleep")
+        self._log_debug(f"Dialog sleep detail: device={device_id} reason={reason!r}")
 
     def _openclaw_enabled(self) -> bool:
         return bool(self.server.openclaw_base_url and self.server.openclaw_token)
@@ -949,7 +1080,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._call_openclaw(device_id, event_type, details)
         except Exception as exc:
-            print(f"OpenClaw event failed: device={device_id} event={event_type} error={exc}", file=sys.stderr, flush=True)
+            self._log_error(f"OpenClaw event failed: {exc}")
+            self._log_debug(f"OpenClaw event failed detail: device={device_id} event={event_type} error={exc}")
             return {
                 "openclaw_enabled": True,
                 "openclaw_sent": False,
@@ -996,11 +1128,11 @@ class Handler(BaseHTTPRequestHandler):
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"OpenClaw HTTP {exc.code}: {detail}") from exc
 
-        print(
-            "OpenClaw response result: "
+        self._log_info(f"OpenClaw response: HTTP {status}")
+        self._log_debug(
+            "OpenClaw response detail: "
             f"device={device_id} event={event_type} status={status} "
-            f"body={truncate_log_text(response_text)!r}",
-            flush=True,
+            f"body={truncate_log_text(response_text)!r}"
         )
 
     def _handle_event_audio(self, filename: str):
@@ -1036,13 +1168,13 @@ class Handler(BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     pass
             if cached_text:
-                print(f"Event audio text changed: {name} {cached_text!r} -> {text!r}", flush=True)
+                self._log_info(f"Event audio text changed: {name} {cached_text!r} -> {text!r}")
         if not os.path.exists(pcm_path) or os.path.getsize(pcm_path) == 0:
-            print(f"Event audio cache miss: {name} -> {text!r}", flush=True)
+            self._log_info(f"Event audio cache miss: {name} -> {text!r}")
             try:
-                audio = self._aliyun_tts_pcm_with_retries(text)
+                audio = aliyun_tts_pcm_with_retries_for_server(self.server, text)
             except Exception as exc:
-                print(f"Event audio TTS failed: {exc}", file=sys.stderr, flush=True)
+                self._log_error(f"Event audio TTS failed: {exc}")
                 self._send_json({"type": "error", "message": str(exc)}, HTTPStatus.BAD_GATEWAY)
                 return
             tmp_path = f"{pcm_path}.tmp"
@@ -1053,7 +1185,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(tmp_meta_path, "w", encoding="utf-8") as fp:
                 fp.write(text)
             os.replace(tmp_meta_path, meta_path)
-            print(f"Event audio cached: {pcm_path} bytes={len(audio)}", flush=True)
+            self._log_info(f"Event audio cached: {pcm_path} bytes={len(audio)}")
         if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
             pcm = read_binary_file(pcm_path)
             tmp_path = f"{wav_path}.tmp"
@@ -1080,7 +1212,7 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError):
-            print(f"Event audio client disconnected: {name}", flush=True)
+            self._log_info(f"Event audio client disconnected: {name}")
 
     def _handle_upload_image(self, body: bytes):
         if not body:
@@ -1091,7 +1223,10 @@ class Handler(BaseHTTPRequestHandler):
         width = int(self.headers.get("X-Image-Width", "0") or "0")
         height = int(self.headers.get("X-Image-Height", "0") or "0")
         image_format = self.headers.get("X-Image-Format", "").strip().lower()
-        device_id = self.headers.get("X-Device-Id", "unknown").replace(":", "")
+        device_id = self.headers.get("X-Device-Id", "unknown")
+        device_id = safe_device_id(device_id)
+        visual_tracking_requested = parse_bool(self.headers.get("X-Visual-Tracking", "true"))
+        self._mark_device_seen(device_id)
         safe_device = re.sub(r"[^A-Za-z0-9_.-]+", "_", device_id)[:40] or "unknown"
 
         os.makedirs(self.server.capture_dir, exist_ok=True)
@@ -1135,10 +1270,19 @@ class Handler(BaseHTTPRequestHandler):
             elif self.server.face_detector_backend == "legacy":
                 face_visual_path, face_result = detect_and_visualize_faces(raw_path, f"{base}.faces.png")
 
-        print(
-            f"Image upload: bytes={len(body)} type={content_type} format={image_format} "
+        if visual_tracking_requested:
+            tracking_command = self._maybe_enqueue_visual_tracking(device_id, width, height, face_result)
+        else:
+            tracking_command = {"status": "suppressed"}
+        self._log_info(
+            "Image upload processed: "
+            f"{width}x{height}, faces={len(face_result.get('faces', []))}, "
+            f"tracking={tracking_command.get('status', 'none')}"
+        )
+        self._log_debug(
+            f"Image upload detail: bytes={len(body)} type={content_type} format={image_format} "
             f"size={width}x{height} raw={raw_path} bmp={bmp_path} png={png_path} "
-            f"faces={len(face_result.get('faces', []))} face_visual={face_visual_path}"
+            f"face_visual={face_visual_path} tracking={compact_log_json(tracking_command)}"
         )
         self._send_json(
             {
@@ -1152,8 +1296,106 @@ class Handler(BaseHTTPRequestHandler):
                 "png_path": png_path,
                 "face_visual_path": face_visual_path,
                 "face_detection": face_result,
+                "visual_tracking": tracking_command,
             }
         )
+
+    def _maybe_enqueue_visual_tracking(self, device_id: str, width: int, height: int, face_result: dict) -> dict:
+        if not self.server.visual_tracking_enabled:
+            return {"status": "disabled"}
+        if not face_result.get("available"):
+            return {"status": "no_detector", "message": face_result.get("error", "")}
+        best_face = face_result.get("best_face")
+        if not isinstance(best_face, dict):
+            return {"status": "no_face"}
+
+        detect_width = float(face_result.get("width") or width or 0)
+        detect_height = float(face_result.get("height") or height or 0)
+        if detect_width <= 0 or detect_height <= 0:
+            return {"status": "bad_frame_size"}
+        center = best_face.get("center") if isinstance(best_face.get("center"), dict) else {}
+        face_x = float(center.get("x", detect_width / 2.0))
+        face_y = float(center.get("y", detect_height / 2.0))
+        error_x = face_x - detect_width / 2.0
+        error_y = face_y - detect_height / 2.0
+        if self.server.visual_tracking_invert_x:
+            error_x = -error_x
+        if self.server.visual_tracking_invert_y:
+            error_y = -error_y
+        deadzone = float(self.server.visual_tracking_deadzone_px)
+
+        steps = []
+        if abs(error_x) > deadzone:
+            steps.append(
+                {
+                    "type": "motion",
+                    "direction": "right" if error_x > 0 else "left",
+                    "degree": self._visual_tracking_degree(
+                        abs(error_x), detect_width / 2.0, self.server.visual_tracking_gain_x
+                    ),
+                    "duration_ms": self.server.visual_tracking_duration_ms,
+                }
+            )
+        if abs(error_y) > deadzone:
+            steps.append(
+                {
+                    "type": "motion",
+                    "direction": "down" if error_y > 0 else "up",
+                    "degree": self._visual_tracking_degree(
+                        abs(error_y), detect_height / 2.0, self.server.visual_tracking_gain_y
+                    ),
+                    "duration_ms": self.server.visual_tracking_duration_ms,
+                }
+            )
+        if not steps:
+            return {
+                "status": "centered",
+                "target": {"x": face_x, "y": face_y},
+                "error": {"x": error_x, "y": error_y},
+            }
+
+        queue = self._queue_for(device_id)
+        if queue.qsize() >= self.server.visual_tracking_max_pending:
+            return {
+                "status": "skipped_queue_full",
+                "pending_commands": queue.qsize(),
+                "max_pending": self.server.visual_tracking_max_pending,
+            }
+
+        now = time.time()
+        last_command_at = self.server.visual_tracking_last_command_at.get(device_id, 0.0)
+        min_interval = self.server.visual_tracking_min_interval_ms / 1000.0
+        if now - last_command_at < min_interval:
+            return {
+                "status": "skipped_rate_limited",
+                "elapsed_ms": round((now - last_command_at) * 1000.0, 1),
+                "min_interval_ms": self.server.visual_tracking_min_interval_ms,
+            }
+
+        if len(steps) == 1:
+            payload = steps[0]
+            payload = {key: value for key, value in payload.items() if key != "type"}
+            command = make_command("motion", payload, priority=0, interrupt=False)
+        else:
+            command = make_command("sequence", steps, priority=0, interrupt=False)
+        self._enqueue_command(device_id, command)
+        self.server.visual_tracking_last_command_at[device_id] = now
+        return {
+            "status": "queued",
+            "device_id": device_id,
+            "cmd_id": command["cmd_id"],
+            "command": command,
+            "target": {"x": face_x, "y": face_y},
+            "error": {"x": error_x, "y": error_y},
+        }
+
+    def _visual_tracking_degree(self, abs_error_px: float, half_dimension_px: float, gain: float) -> float:
+        if half_dimension_px <= 0:
+            return self.server.visual_tracking_min_degree
+        ratio = min(1.0, abs_error_px / half_dimension_px)
+        degree = ratio * self.server.visual_tracking_max_degree * gain
+        degree = max(self.server.visual_tracking_min_degree, min(self.server.visual_tracking_max_degree, degree))
+        return round(degree, 1)
 
     def _aliyun_asr(self, audio: bytes, audio_format: str, sample_rate: int):
         params = {
@@ -1190,16 +1432,16 @@ class Handler(BaseHTTPRequestHandler):
 
         stream_started = time.perf_counter()
         try:
-            print(f"TTS prepare first sentence: {parts[0]!r}", flush=True)
+            self._log_info(f"TTS prepare first sentence: {parts[0]!r}")
             first_audio = self._aliyun_tts_pcm_with_retries(parts[0])
         except Exception as exc:
-            print(f"TTS failed before stream started: {exc}", file=sys.stderr, flush=True)
+            self._log_error(f"TTS failed before stream started: {exc}")
             self._send_json({"type": "error", "message": str(exc)}, HTTPStatus.BAD_GATEWAY)
             return
 
         first_ready_ms = (time.perf_counter() - stream_started) * 1000
         tail_silence = self._tts_tail_silence()
-        print(f"TTS stream: {len(parts)} sentence(s), first_ready_ms={first_ready_ms:.0f}, text={text!r}", flush=True)
+        self._log_info(f"TTS stream: {len(parts)} sentence(s), first_ready_ms={first_ready_ms:.0f}, text={text!r}")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("X-Audio-Format", "pcm_s16le")
@@ -1212,7 +1454,7 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
 
         try:
-            print(f"TTS audio bytes: {len(first_audio)} for {parts[0]!r}", flush=True)
+            self._log_info(f"TTS audio bytes: {len(first_audio)} for {parts[0]!r}")
             if first_audio:
                 self.wfile.write(first_audio)
                 self.wfile.flush()
@@ -1225,7 +1467,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     sent_bytes += len(tail_silence)
                 total_ms = (time.perf_counter() - stream_started) * 1000
-                print(f"TTS stream done: bytes={sent_bytes} total_ms={total_ms:.0f}", flush=True)
+                self._log_info(f"TTS stream done: bytes={sent_bytes} total_ms={total_ms:.0f}")
                 return
 
             workers = max(1, min(self.server.tts_prefetch_workers, len(remaining)))
@@ -1234,10 +1476,10 @@ class Handler(BaseHTTPRequestHandler):
                 future_timeout = self.server.tts_request_timeout * (self.server.tts_retries + 1) + 5
                 for part, future in zip(remaining, futures):
                     wait_started = time.perf_counter()
-                    print(f"TTS sentence ready wait: {part!r}", flush=True)
+                    self._log_info(f"TTS sentence ready wait: {part!r}")
                     audio = future.result(timeout=future_timeout)
                     wait_ms = (time.perf_counter() - wait_started) * 1000
-                    print(f"TTS audio bytes: {len(audio)} wait_ms={wait_ms:.0f} for {part!r}", flush=True)
+                    self._log_info(f"TTS audio bytes: {len(audio)} wait_ms={wait_ms:.0f} for {part!r}")
                     if audio:
                         self.wfile.write(audio)
                         self.wfile.flush()
@@ -1247,13 +1489,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 sent_bytes += len(tail_silence)
             total_ms = (time.perf_counter() - stream_started) * 1000
-            print(f"TTS stream done: bytes={sent_bytes} total_ms={total_ms:.0f}", flush=True)
+            self._log_info(f"TTS stream done: bytes={sent_bytes} total_ms={total_ms:.0f}")
         except (BrokenPipeError, ConnectionResetError):
-            print("TTS client disconnected")
+            self._log_info("TTS client disconnected")
         except TimeoutError:
-            print("TTS failed after stream started: sentence timed out", file=sys.stderr, flush=True)
+            self._log_error("TTS failed after stream started: sentence timed out")
         except Exception as exc:
-            print(f"TTS failed after stream started: {exc}", file=sys.stderr, flush=True)
+            self._log_error(f"TTS failed after stream started: {exc}")
 
     def _aliyun_tts_pcm_with_retries(self, text: str) -> bytes:
         last_error: Exception | None = None
@@ -1262,7 +1504,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._aliyun_tts_pcm(text)
             except Exception as exc:
                 last_error = exc
-                print(f"TTS attempt {attempt} failed for {text!r}: {exc}", file=sys.stderr, flush=True)
+                self._log_error(f"TTS attempt {attempt} failed for {text!r}: {exc}")
         raise RuntimeError(f"Aliyun TTS failed after {self.server.tts_retries + 1} attempt(s): {last_error}")
 
     def _tts_tail_silence(self) -> bytes:
@@ -1292,7 +1534,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError(resp.read().decode("utf-8", errors="replace"))
                 audio = resp.read()
                 elapsed_ms = (time.perf_counter() - started) * 1000
-                print(f"Aliyun TTS ok: chars={len(text)} bytes={len(audio)} elapsed_ms={elapsed_ms:.0f}", flush=True)
+                self._log_info(f"Aliyun TTS ok: chars={len(text)} bytes={len(audio)} elapsed_ms={elapsed_ms:.0f}")
                 return audio
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -1317,15 +1559,31 @@ class Handler(BaseHTTPRequestHandler):
             or path in ("/device/event", "/event", "/device/ack")
         ):
             return
-        print(
-            "API result: "
-            f"method={self.command} path={self.path!r} status={int(status)} "
-            f"body={compact_log_json(body)}",
-            flush=True,
-        )
+        if self._debug_enabled():
+            self._log_debug(
+                "API result detail: "
+                f"method={self.command} path={self.path!r} status={int(status)} "
+                f"body={compact_log_json(body)}"
+            )
+            return
+        if path in ("/device/ack",):
+            ack = body.get("ack") if isinstance(body.get("ack"), dict) else {}
+            self._log_info(f"API ack: {ack.get('status', 'unknown')}")
+            return
+        if path == "/command" or path.startswith("/command/"):
+            command = body.get("command") if isinstance(body.get("command"), dict) else {}
+            self._log_info(f"API command response: {body.get('type', 'response')} {command.get('type', '')}".rstrip())
+            return
+        self._log_info(f"API response: {path} -> {int(status)}")
 
     def log_message(self, fmt, *args):
-        print(f"{self.client_address[0]} - {fmt % args}")
+        if self._debug_enabled():
+            self._log_debug(f"{self.client_address[0]} - {fmt % args}")
+            return
+        parsed = urllib.parse.urlparse(getattr(self, "path", ""))
+        code = args[1] if len(args) > 1 else ""
+        suffix = f" -> {code}" if code else ""
+        self._log_info(f"HTTP {getattr(self, 'command', '')} {parsed.path}{suffix}")
 
 
 def required_env(name: str) -> str:
@@ -1453,6 +1711,86 @@ def parse_bool(value: str) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def aliyun_tts_pcm_for_server(server: AliyunVoiceServer, text: str) -> bytes:
+    started = time.perf_counter()
+    params = {
+        "appkey": server.appkey,
+        "token": server.get_token(),
+        "text": text,
+        "format": "pcm",
+        "sample_rate": server.sample_rate,
+        "voice": server.voice,
+        "volume": server.volume,
+        "speech_rate": server.speech_rate,
+        "pitch_rate": server.pitch_rate,
+    }
+    url = server.tts_url + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=server.tts_request_timeout) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            if "json" in content_type:
+                raise RuntimeError(resp.read().decode("utf-8", errors="replace"))
+            audio = resp.read()
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            log_print(f"Aliyun TTS ok: chars={len(text)} bytes={len(audio)} elapsed_ms={elapsed_ms:.0f}")
+            return audio
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Aliyun TTS HTTP {exc.code}: {detail}") from exc
+
+
+def aliyun_tts_pcm_with_retries_for_server(server: AliyunVoiceServer, text: str) -> bytes:
+    last_error: Exception | None = None
+    for attempt in range(1, server.tts_retries + 2):
+        try:
+            return aliyun_tts_pcm_for_server(server, text)
+        except Exception as exc:
+            last_error = exc
+            log_print(f"TTS attempt {attempt} failed for {text!r}: {exc}", file=sys.stderr)
+    raise RuntimeError(f"Aliyun TTS failed after {server.tts_retries + 1} attempt(s): {last_error}")
+
+
+def ensure_event_audio_cache(server: AliyunVoiceServer, name: str) -> None:
+    if name not in HEAD_TOUCH_EVENT_TEXT:
+        raise ValueError(f"unknown event audio: {name}")
+    cache_dir = os.path.join(server.static_dir, "event-audio")
+    os.makedirs(cache_dir, exist_ok=True)
+    pcm_path = os.path.join(cache_dir, f"{name}.pcm")
+    wav_path = os.path.join(cache_dir, f"{name}.wav")
+    meta_path = os.path.join(cache_dir, f"{name}.txt")
+    text = HEAD_TOUCH_EVENT_TEXT[name]
+    cached_text = ""
+    if os.path.exists(meta_path):
+        try:
+            cached_text = read_binary_file(meta_path).decode("utf-8")
+        except UnicodeDecodeError:
+            cached_text = ""
+    if cached_text != text:
+        for stale_path in (pcm_path, wav_path):
+            try:
+                os.remove(stale_path)
+            except FileNotFoundError:
+                pass
+    if not os.path.exists(pcm_path) or os.path.getsize(pcm_path) == 0:
+        audio = aliyun_tts_pcm_with_retries_for_server(server, text)
+        tmp_path = f"{pcm_path}.tmp"
+        with open(tmp_path, "wb") as fp:
+            fp.write(audio)
+        os.replace(tmp_path, pcm_path)
+        tmp_meta_path = f"{meta_path}.tmp"
+        with open(tmp_meta_path, "w", encoding="utf-8") as fp:
+            fp.write(text)
+        os.replace(tmp_meta_path, meta_path)
+        log_print(f"Event audio cached: {pcm_path} bytes={len(audio)}")
+    if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
+        pcm = read_binary_file(pcm_path)
+        tmp_path = f"{wav_path}.tmp"
+        with open(tmp_path, "wb") as fp:
+            fp.write(pcm_to_wav(pcm, server.sample_rate))
+        os.replace(tmp_path, wav_path)
+
+
 def safe_device_id(device_id: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(device_id).strip())[:64]
     return safe or "default"
@@ -1504,6 +1842,19 @@ def command_payload_from_query(command_type: str, query: dict):
         return {"expression": normalize_expression_name(expression)}
     if command_type == "speak":
         return {"text": first_value(query, "text") or "你好呀"}
+    if command_type in ("volume", "sound"):
+        direction = first_value(query, "direction") or first_value(query, "action") or first_value(query, "type") or "up"
+        mode = first_value(query, "mode") or ""
+        value = first_value(query, "value")
+        if mode == "set" or value is not None:
+            return {
+                "mode": "set",
+                "value": int(value or "100"),
+            }
+        return {
+            "direction": direction,
+            "step": int(first_value(query, "step") or "10"),
+        }
     if command_type == "play_audio":
         return {"url": first_value(query, "url")}
     if command_type in ("motion", "move"):
@@ -1518,6 +1869,14 @@ def command_payload_from_query(command_type: str, query: dict):
             "pan": float(first_value(query, "pan") or "0"),
             "tilt": float(first_value(query, "tilt") or "45"),
             "duration_ms": int(first_value(query, "duration_ms") or "500"),
+        }
+    if command_type in ("find_owner", "locate_owner"):
+        return {
+            "rounds": int(first_value(query, "rounds") or "1"),
+            "reply": first_value(query, "reply") or "我在",
+            "gain_x": float(first_value(query, "gain_x") or "1.0"),
+            "gain_y": float(first_value(query, "gain_y") or "0.8"),
+            "stop_pixels": float(first_value(query, "stop_pixels") or "32"),
         }
     if command_type == "stop":
         return {}
@@ -1649,6 +2008,7 @@ def main():
     load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
     parser = argparse.ArgumentParser(description="Local Xiaopai bridge for Aliyun ASR and PCM streaming TTS.")
+    parser.add_argument("--debug", action="store_true", default=parse_bool(os.environ.get("STACKCHAN_DEBUG", "false")))
     parser.add_argument("--host", default=os.environ.get("STACKCHAN_ALIYUN_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_PORT", "8091")))
     parser.add_argument("--region", choices=sorted(ASR_URLS), default=os.environ.get("STACKCHAN_ALIYUN_REGION", "shanghai"))
@@ -1690,6 +2050,82 @@ def main():
         default=float(os.environ.get("STACKCHAN_YUNET_NMS_THRESHOLD", "0.3")),
     )
     parser.add_argument("--yunet-top-k", type=int, default=int(os.environ.get("STACKCHAN_YUNET_TOP_K", "5000")))
+    parser.add_argument(
+        "--visual-tracking-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Queue Xiaopai motion commands from /upload-image face detections.",
+    )
+    parser.add_argument(
+        "--visual-tracking-deadzone-px",
+        type=float,
+        default=20.0,
+    )
+    parser.add_argument(
+        "--visual-tracking-gain-x",
+        type=float,
+        default=1.0,
+        help="Horizontal multiplier for pixel error to head-motion degree conversion.",
+    )
+    parser.add_argument(
+        "--visual-tracking-gain-y",
+        type=float,
+        default=1.0,
+        help="Vertical multiplier for pixel error to head-motion degree conversion.",
+    )
+    parser.add_argument(
+        "--visual-tracking-max-degree",
+        type=float,
+        default=12.0,
+    )
+    parser.add_argument(
+        "--visual-tracking-min-degree",
+        type=float,
+        default=2.0,
+    )
+    parser.add_argument(
+        "--visual-tracking-duration-ms",
+        type=int,
+        default=280,
+    )
+    parser.add_argument(
+        "--visual-tracking-min-interval-ms",
+        type=int,
+        default=350,
+    )
+    parser.add_argument(
+        "--visual-tracking-max-pending",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--visual-tracking-invert-x",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--visual-tracking-invert-y",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--find-owner-gain-x",
+        type=float,
+        default=1.0,
+        help="Horizontal multiplier for wake-up owner finding.",
+    )
+    parser.add_argument(
+        "--find-owner-gain-y",
+        type=float,
+        default=0.8,
+        help="Vertical multiplier for wake-up owner finding.",
+    )
+    parser.add_argument(
+        "--find-owner-stop-pixels",
+        type=float,
+        default=32.0,
+        help="Stop moving when the detected face center is within this many pixels of frame center.",
+    )
     parser.add_argument("--openclaw-base-url", default=optional_env("STACKCHAN_OPENCLAW_BASE_URL", "OPENCLAW_BASE_URL"))
     parser.add_argument("--openclaw-token", default=optional_env("STACKCHAN_OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"))
     parser.add_argument("--openclaw-model", default=os.environ.get("STACKCHAN_OPENCLAW_MODEL", "openclaw/default"))
@@ -1730,6 +2166,7 @@ def main():
     httpd.tts_request_timeout = args.tts_request_timeout
     httpd.tts_retries = args.tts_retries
     httpd.tts_tail_silence_ms = args.tts_tail_silence_ms
+    httpd.debug_log = args.debug
     httpd.capture_dir = args.capture_dir
     httpd.static_dir = args.static_dir
     httpd.face_detector_backend = args.face_detector
@@ -1741,6 +2178,21 @@ def main():
             nms_threshold=args.yunet_nms_threshold,
             top_k=args.yunet_top_k,
         )
+    httpd.visual_tracking_enabled = args.visual_tracking_enabled
+    httpd.visual_tracking_deadzone_px = args.visual_tracking_deadzone_px
+    httpd.visual_tracking_gain_x = args.visual_tracking_gain_x
+    httpd.visual_tracking_gain_y = args.visual_tracking_gain_y
+    httpd.visual_tracking_max_degree = args.visual_tracking_max_degree
+    httpd.visual_tracking_min_degree = args.visual_tracking_min_degree
+    httpd.visual_tracking_duration_ms = args.visual_tracking_duration_ms
+    httpd.visual_tracking_min_interval_ms = args.visual_tracking_min_interval_ms
+    httpd.visual_tracking_max_pending = args.visual_tracking_max_pending
+    httpd.visual_tracking_invert_x = args.visual_tracking_invert_x
+    httpd.visual_tracking_invert_y = args.visual_tracking_invert_y
+    httpd.visual_tracking_last_command_at = {}
+    httpd.find_owner_gain_x = args.find_owner_gain_x
+    httpd.find_owner_gain_y = args.find_owner_gain_y
+    httpd.find_owner_stop_pixels = args.find_owner_stop_pixels
     httpd.openclaw_base_url = args.openclaw_base_url
     httpd.openclaw_token = args.openclaw_token
     httpd.openclaw_model = args.openclaw_model
@@ -1754,19 +2206,39 @@ def main():
     httpd.device_order = []
     httpd.dialog_awake_until = {}
 
-    print("Xiaopai Aliyun voice bridge")
-    print(f"  health: http://127.0.0.1:{args.port}/health")
-    print(f"  ASR:    http://{args.host}:{args.port}/upload")
-    print(f"  TTS:    http://{args.host}:{args.port}/stream-speak?text=...")
-    print(f"  Events: http://{args.host}:{args.port}/head-touch-events -> {args.static_dir}/event-audio")
-    print(f"  Image:  http://{args.host}:{args.port}/upload-image -> {args.capture_dir}")
-    print(f"  Face detector: {args.face_detector}{' ' + args.yunet_model if args.face_detector == 'yunet' else ''}")
-    print(f"  OpenClaw: {'enabled' if httpd.openclaw_base_url and httpd.openclaw_token else 'disabled'} {httpd.openclaw_base_url or ''}")
-    print(f"  TTS tail silence: {args.tts_tail_silence_ms}ms")
-    print(f"  Command push via HTTP long poll:")
-    print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")
-    print(f"          send:   GET http://{args.host}:{args.port}/command/speak?device_id=...&text=...")
-    print(f"  voice:  {args.voice}, pcm_s16le {args.sample_rate}Hz mono")
+    try:
+        ensure_event_audio_cache(httpd, "wake_reply")
+    except Exception as exc:
+        log_print(f"Wake reply audio pre-cache failed: {exc}", file=sys.stderr)
+
+    log_print("Xiaopai server ready")
+    log_print(f"  face detector: {args.face_detector}")
+    log_print(f"  visual tracking: {'enabled' if args.visual_tracking_enabled else 'disabled'}")
+    log_print(f"  OpenClaw: {'enabled' if httpd.openclaw_base_url and httpd.openclaw_token else 'disabled'}")
+    if args.debug:
+        log_print("  debug: enabled")
+        log_print(f"  health: http://127.0.0.1:{args.port}/health")
+        log_print(f"  ASR:    http://{args.host}:{args.port}/upload")
+        log_print(f"  TTS:    http://{args.host}:{args.port}/stream-speak?text=...")
+        log_print(f"  Events: http://{args.host}:{args.port}/head-touch-events -> {args.static_dir}/event-audio")
+        log_print(f"  Image:  http://{args.host}:{args.port}/upload-image -> {args.capture_dir}")
+        log_print(f"  Face detector detail: {args.face_detector}{' ' + args.yunet_model if args.face_detector == 'yunet' else ''}")
+        log_print(
+            f"  Visual tracking detail: deadzone={args.visual_tracking_deadzone_px}px "
+            f"gain_x={args.visual_tracking_gain_x} gain_y={args.visual_tracking_gain_y} "
+            f"max_step={args.visual_tracking_max_degree}deg "
+            f"invert_x={args.visual_tracking_invert_x} invert_y={args.visual_tracking_invert_y}"
+        )
+        log_print(
+            f"  Find-owner detail: gain_x={args.find_owner_gain_x} gain_y={args.find_owner_gain_y} "
+            f"stop={args.find_owner_stop_pixels}px"
+        )
+        log_print(f"  OpenClaw detail: {httpd.openclaw_base_url or ''}")
+        log_print(f"  TTS tail silence: {args.tts_tail_silence_ms}ms")
+        log_print(f"  Command push via HTTP long poll:")
+        log_print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")
+        log_print(f"          send:   GET http://{args.host}:{args.port}/command/speak?device_id=...&text=...")
+        log_print(f"  voice:  {args.voice}, pcm_s16le {args.sample_rate}Hz mono")
     httpd.serve_forever()
 
 
