@@ -1,5 +1,6 @@
 .venv/
 .env
 captures/
+yunet-head-results*/
 __pycache__/
 *.pyc

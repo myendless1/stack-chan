@@ -40,12 +40,17 @@ if has_requirements requirements.txt; then
   pip_install requirements.txt
 fi
 
+if has_requirements requirements-yunet.txt; then
+  pip_install requirements-yunet.txt
+fi
+
 if ! "$VENV/bin/python" - <<'PY' >/dev/null 2>&1
-import face_recognition
+import cv2
+import numpy
 PY
 then
-  echo "Optional face_recognition is not installed; image upload works, face boxes are disabled." >&2
-  echo "Install it later with: env -u http_proxy -u https_proxy -u all_proxy $VENV/bin/python -m pip install -i $PIP_INDEX_URL --trusted-host $PIP_TRUSTED_HOST -r requirements-face.txt" >&2
+  echo "YuNet dependencies are not installed; image upload works, face boxes may be disabled." >&2
+  echo "Install them later with: env -u http_proxy -u https_proxy -u all_proxy $VENV/bin/python -m pip install -i $PIP_INDEX_URL --trusted-host $PIP_TRUSTED_HOST -r requirements-yunet.txt" >&2
 fi
 
 if { [ -z "${ALIYUN_NLS_TOKEN:-}" ] && { [ -z "${ALIYUN_AK_ID:-}" ] || [ -z "${ALIYUN_AK_SECRET:-}" ]; }; } || [ -z "${ALIYUN_NLS_APPKEY:-}" ]; then

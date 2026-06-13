@@ -20,6 +20,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Empty, Queue
 
+from yunet_service import YunetFaceService
+
 
 ASR_URLS = {
     "shanghai": "https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/asr",
@@ -451,6 +453,8 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     openclaw_timeout: int
     openclaw_max_completion_tokens: int
     openclaw_session_prefix: str
+    face_detector_backend: str
+    face_detector: YunetFaceService | None
     device_queues: dict[str, Queue]
     last_ack: dict[str, dict]
     last_seen: dict[str, float]
@@ -487,6 +491,9 @@ class Handler(BaseHTTPRequestHandler):
                     "expressions": list(AVAILABLE_EXPRESSIONS),
                     "actions": list(AVAILABLE_ACTIONS),
                     "head_touch_events": HEAD_TOUCH_EVENT_TEXT,
+                    "face_detector": self.server.face_detector.status()
+                    if self.server.face_detector is not None
+                    else {"backend": self.server.face_detector_backend, "available": False},
                     "openclaw": {
                         "enabled": self._openclaw_enabled(),
                         "base_url": self.server.openclaw_base_url,
@@ -1118,9 +1125,15 @@ class Handler(BaseHTTPRequestHandler):
             png_path = f"{base}.png"
             with open(png_path, "wb") as fp:
                 fp.write(rgb565_to_png(body, width, height))
-            face_visual_path, face_result = detect_and_visualize_faces(png_path, f"{base}.faces.png")
+            if self.server.face_detector is not None:
+                face_visual_path, face_result = self.server.face_detector.detect_rgb565(body, width, height, f"{base}.faces.jpg")
+            elif self.server.face_detector_backend == "legacy":
+                face_visual_path, face_result = detect_and_visualize_faces(png_path, f"{base}.faces.png")
         elif content_type.startswith("image/jpeg"):
-            face_visual_path, face_result = detect_and_visualize_faces(raw_path, f"{base}.faces.png")
+            if self.server.face_detector is not None:
+                face_visual_path, face_result = self.server.face_detector.detect_jpeg(body, f"{base}.faces.jpg")
+            elif self.server.face_detector_backend == "legacy":
+                face_visual_path, face_result = detect_and_visualize_faces(raw_path, f"{base}.faces.png")
 
         print(
             f"Image upload: bytes={len(body)} type={content_type} format={image_format} "
@@ -1653,6 +1666,30 @@ def main():
     parser.add_argument("--tts-tail-silence-ms", type=int, default=int(os.environ.get("STACKCHAN_TTS_TAIL_SILENCE_MS", "350")))
     parser.add_argument("--capture-dir", default=os.environ.get("STACKCHAN_CAPTURE_DIR", "captures"))
     parser.add_argument("--static-dir", default=os.environ.get("STACKCHAN_STATIC_DIR", "static"))
+    parser.add_argument(
+        "--face-detector",
+        choices=("yunet", "legacy", "none"),
+        default=os.environ.get("STACKCHAN_FACE_DETECTOR", "yunet"),
+        help="Face detection backend for /upload-image.",
+    )
+    parser.add_argument(
+        "--yunet-model",
+        default=os.environ.get(
+            "STACKCHAN_YUNET_MODEL",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "face_detection_yunet_2023mar.onnx"),
+        ),
+    )
+    parser.add_argument(
+        "--yunet-score-threshold",
+        type=float,
+        default=float(os.environ.get("STACKCHAN_YUNET_SCORE_THRESHOLD", "0.45")),
+    )
+    parser.add_argument(
+        "--yunet-nms-threshold",
+        type=float,
+        default=float(os.environ.get("STACKCHAN_YUNET_NMS_THRESHOLD", "0.3")),
+    )
+    parser.add_argument("--yunet-top-k", type=int, default=int(os.environ.get("STACKCHAN_YUNET_TOP_K", "5000")))
     parser.add_argument("--openclaw-base-url", default=optional_env("STACKCHAN_OPENCLAW_BASE_URL", "OPENCLAW_BASE_URL"))
     parser.add_argument("--openclaw-token", default=optional_env("STACKCHAN_OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"))
     parser.add_argument("--openclaw-model", default=os.environ.get("STACKCHAN_OPENCLAW_MODEL", "openclaw/default"))
@@ -1695,6 +1732,15 @@ def main():
     httpd.tts_tail_silence_ms = args.tts_tail_silence_ms
     httpd.capture_dir = args.capture_dir
     httpd.static_dir = args.static_dir
+    httpd.face_detector_backend = args.face_detector
+    httpd.face_detector = None
+    if args.face_detector == "yunet":
+        httpd.face_detector = YunetFaceService(
+            args.yunet_model,
+            score_threshold=args.yunet_score_threshold,
+            nms_threshold=args.yunet_nms_threshold,
+            top_k=args.yunet_top_k,
+        )
     httpd.openclaw_base_url = args.openclaw_base_url
     httpd.openclaw_token = args.openclaw_token
     httpd.openclaw_model = args.openclaw_model
@@ -1714,6 +1760,7 @@ def main():
     print(f"  TTS:    http://{args.host}:{args.port}/stream-speak?text=...")
     print(f"  Events: http://{args.host}:{args.port}/head-touch-events -> {args.static_dir}/event-audio")
     print(f"  Image:  http://{args.host}:{args.port}/upload-image -> {args.capture_dir}")
+    print(f"  Face detector: {args.face_detector}{' ' + args.yunet_model if args.face_detector == 'yunet' else ''}")
     print(f"  OpenClaw: {'enabled' if httpd.openclaw_base_url and httpd.openclaw_token else 'disabled'} {httpd.openclaw_base_url or ''}")
     print(f"  TTS tail silence: {args.tts_tail_silence_ms}ms")
     print(f"  Command push via HTTP long poll:")

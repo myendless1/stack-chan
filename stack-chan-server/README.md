@@ -9,7 +9,7 @@ Local bridge server for the Xiaopai firmware in this repository. It keeps cloud 
 - OpenClaw event bridge: speech recognition text and device events can be sent to OpenClaw; OpenClaw controls Xiaopai through the HTTP command API.
 - Camera upload receiver for Xiaopai RGB565 frames.
 - RGB565 conversion to PNG and BMP. The Xiaopai camera data is decoded as big-endian RGB565.
-- Face detection visualization using `ageitgey/face_recognition`: detected face boxes and landmarks are saved as `*.faces.png`.
+- Local CPU face/head detection using OpenCV YuNet. Detected boxes are returned in the `/upload-image` response and saved as `*.faces.jpg` visualizations.
 - Legacy local open-source STT/TTS utilities are kept under `legacy/`.
 
 ## Setup
@@ -30,11 +30,11 @@ EOF
 
 The server can also use `ALIYUN_NLS_TOKEN` directly. With `ALIYUN_AK_ID` and `ALIYUN_AK_SECRET`, it creates and refreshes the NLS token automatically. The default ASR/TTS/command server uses only Python standard library modules.
 
-Face detection visualization is optional because `face_recognition_models` is large. Install it only when needed:
+YuNet face detection uses OpenCV and the small ONNX checkpoint in `models/`. `start.sh` installs the YuNet dependencies automatically. To install them manually:
 
 ```bash
 cd stack-chan-server
-.venv/bin/python -m pip install -r requirements-face.txt
+.venv/bin/python -m pip install -r requirements-yunet.txt
 ```
 
 `start.sh` uses Tsinghua PyPI by default and clears proxy variables for pip installs. Override with `STACKCHAN_PIP_INDEX_URL` and `STACKCHAN_PIP_TRUSTED_HOST` if needed.
@@ -174,9 +174,9 @@ The server saves:
 - `*.rgb565`: raw upload
 - `*.png`: converted image
 - `*.bmp`: converted image
-- `*.faces.png`: face detection visualization, when dependencies are available
+- `*.faces.jpg`: YuNet face/head detection visualization, when dependencies are available
 
-Response includes `png_path`, `face_visual_path`, and `face_detection`.
+Response includes `png_path`, `face_visual_path`, and `face_detection`. `face_detection.best_face.center` is the main field for visual tracking.
 
 ## Configuration
 
@@ -205,6 +205,11 @@ Environment variables:
 | `STACKCHAN_ALIYUN_TTS_RETRIES` | `2` | TTS retry count |
 | `STACKCHAN_CAPTURE_DIR` | `captures` | Directory for image uploads |
 | `STACKCHAN_STATIC_DIR` | `static` | Directory for cached static assets such as head-touch event audio |
+| `STACKCHAN_FACE_DETECTOR` | `yunet` | Face detector backend for `/upload-image`: `yunet`, `legacy`, or `none` |
+| `STACKCHAN_YUNET_MODEL` | `models/face_detection_yunet_2023mar.onnx` | YuNet ONNX checkpoint path |
+| `STACKCHAN_YUNET_SCORE_THRESHOLD` | `0.45` | YuNet confidence threshold |
+| `STACKCHAN_YUNET_NMS_THRESHOLD` | `0.3` | YuNet non-maximum suppression threshold |
+| `STACKCHAN_YUNET_TOP_K` | `5000` | YuNet pre-NMS top-k candidate limit |
 | `OPENCLAW_BASE_URL` / `STACKCHAN_OPENCLAW_BASE_URL` | empty | OpenClaw OpenAI-compatible base URL, for example `http://127.0.0.1:18789/v1` |
 | `OPENCLAW_GATEWAY_TOKEN` / `STACKCHAN_OPENCLAW_GATEWAY_TOKEN` | empty | OpenClaw Gateway bearer token |
 | `STACKCHAN_OPENCLAW_MODEL` | `openclaw/default` | OpenClaw agent target |
