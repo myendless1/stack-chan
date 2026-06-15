@@ -22,6 +22,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Empty
 
+from realtime_server import RealtimeConfig, RealtimeManager
+from xiaozhi_protocol import ota_config
 from yunet_service import YunetFaceService
 
 
@@ -690,6 +692,11 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     find_owner_gain_x: float
     find_owner_gain_y: float
     find_owner_stop_pixels: float
+    realtime_manager: RealtimeManager | None
+    xiaozhi_ws_path: str
+    xiaozhi_ws_port: int
+    xiaozhi_public_host: str
+    xiaozhi_local_token: str
     device_queues: dict[str, DeviceCommandQueue]
     last_ack: dict[str, dict]
     last_seen: dict[str, float]
@@ -768,6 +775,7 @@ class Handler(BaseHTTPRequestHandler):
                         "base_url": self.server.openclaw_base_url,
                         "model": self.server.openclaw_model,
                     },
+                    "realtime": self._realtime_status(),
                     "command_queue": {
                         "max_size": self.server.command_queue_max_size,
                         "default_priorities": COMMAND_DEFAULT_PRIORITIES,
@@ -776,6 +784,9 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 }
             )
+            return
+        if path == "/xiaozhi/ota":
+            self._handle_xiaozhi_ota(query)
             return
         if path == "/expressions":
             self._send_json(
@@ -885,6 +896,25 @@ class Handler(BaseHTTPRequestHandler):
     def _path_query(self):
         parsed = urllib.parse.urlparse(self.path)
         return parsed.path, urllib.parse.parse_qs(parsed.query)
+
+    def _realtime_status(self) -> dict:
+        manager = getattr(self.server, "realtime_manager", None)
+        return {
+            "enabled": bool(manager and manager.enabled),
+            "ws_path": getattr(self.server, "xiaozhi_ws_path", "/xiaozhi/ws"),
+            "ws_port": getattr(self.server, "xiaozhi_ws_port", 0),
+            "devices": len(manager.devices_snapshot()) if manager else 0,
+        }
+
+    def _handle_xiaozhi_ota(self, query: dict) -> None:
+        host = first_value(query, "host") or getattr(self.server, "xiaozhi_public_host", "")
+        if not host:
+            host_header = self.headers.get("Host", "")
+            host = host_header.split(":", 1)[0] if host_header else "127.0.0.1"
+        port = int(first_value(query, "ws_port") or getattr(self.server, "xiaozhi_ws_port", 0) or self.server.server_port)
+        path = getattr(self.server, "xiaozhi_ws_path", "/xiaozhi/ws")
+        token = getattr(self.server, "xiaozhi_local_token", "")
+        self._send_json(ota_config(f"ws://{host}:{port}{path}", token))
 
     def _handle_upload(self, body: bytes):
         if not body:
@@ -1097,6 +1127,9 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "online_ttl_seconds": DEVICE_ONLINE_TTL_SECONDS,
                 "devices": devices,
+                "realtime_devices": getattr(self.server, "realtime_manager", None).devices_snapshot()
+                if getattr(self.server, "realtime_manager", None)
+                else [],
             }
         )
 
@@ -1228,6 +1261,11 @@ class Handler(BaseHTTPRequestHandler):
     def _resolve_command_device_id(self, requested_device_id: str) -> str:
         device_id = safe_device_id(requested_device_id)
         if is_placeholder_device_id(device_id):
+            manager = getattr(self.server, "realtime_manager", None)
+            if manager:
+                realtime_device = manager.first_device_id()
+                if not is_placeholder_device_id(realtime_device):
+                    return realtime_device
             with self.server.device_lock:
                 first_connected = first_connected_device_id(self.server.last_seen, self.server.device_order)
             if first_connected:
@@ -1244,6 +1282,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def _enqueue_command(self, device_id: str, command: dict) -> bool:
         device_id = safe_device_id(device_id)
+        manager = getattr(self.server, "realtime_manager", None)
+        if manager and manager.has_device(device_id):
+            sent = manager.enqueue_command(device_id, command)
+            detail = ""
+            if command.get("type") == "face" and isinstance(command.get("payload"), dict):
+                detail = f" expression={command['payload'].get('expression', '')}"
+            if sent:
+                self._log_info(f"Realtime command sent: {command['type']}{detail} priority={command.get('priority')}")
+                self._log_debug(
+                    f"Realtime command detail: device={device_id} cmd_id={command['cmd_id']} "
+                    f"type={command['type']}{detail}"
+                )
+                with self.server.device_lock:
+                    self.server.last_ack[device_id] = {
+                        "cmd_id": command.get("cmd_id", ""),
+                        "status": "sent_realtime",
+                        "message": "dispatched via xiaozhi websocket",
+                        "ts": time.time(),
+                    }
+                return True
+            self._log_info(f"Realtime command fallback to queue: {command['type']}{detail}")
         queue = self._queue_for(device_id)
         stats = queue.put(command)
         detail = ""
@@ -2409,6 +2468,31 @@ def main():
         default=int(os.environ.get("STACKCHAN_OPENCLAW_MAX_COMPLETION_TOKENS", "512")),
     )
     parser.add_argument("--openclaw-session-prefix", default=os.environ.get("STACKCHAN_OPENCLAW_SESSION_PREFIX", "xiaopai"))
+    parser.add_argument(
+        "--realtime-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=parse_bool(os.environ.get("STACKCHAN_REALTIME_ENABLED", "true")),
+        help="Enable xiaozhi WebSocket realtime bridge.",
+    )
+    parser.add_argument("--xiaozhi-ws-path", default=os.environ.get("STACKCHAN_XIAOZHI_WS_PATH", "/xiaozhi/ws"))
+    parser.add_argument(
+        "--xiaozhi-ws-port",
+        type=int,
+        default=int(os.environ.get("STACKCHAN_XIAOZHI_WS_PORT", "0")),
+        help="Realtime WebSocket port. Defaults to HTTP port + 1 because the legacy HTTP server is stdlib-only.",
+    )
+    parser.add_argument("--xiaozhi-public-host", default=os.environ.get("STACKCHAN_XIAOZHI_PUBLIC_HOST", ""))
+    parser.add_argument("--xiaozhi-local-token", default=os.environ.get("STACKCHAN_XIAOZHI_LOCAL_TOKEN", ""))
+    parser.add_argument("--aliyun-asr-ws-url", default=os.environ.get("STACKCHAN_ALIYUN_ASR_WS_URL", ""))
+    parser.add_argument("--aliyun-tts-ws-url", default=os.environ.get("STACKCHAN_ALIYUN_TTS_WS_URL", ""))
+    parser.add_argument("--audio-upstream-format", default=os.environ.get("STACKCHAN_AUDIO_UPSTREAM_FORMAT", "opus"))
+    parser.add_argument("--aliyun-upstream-format", default=os.environ.get("STACKCHAN_ALIYUN_UPSTREAM_FORMAT", "pcm"))
+    parser.add_argument(
+        "--http-compat-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=parse_bool(os.environ.get("STACKCHAN_HTTP_COMPAT_ENABLED", "true")),
+        help="Keep legacy HTTP command and upload APIs available.",
+    )
     args = parser.parse_args()
 
     httpd = AliyunVoiceServer((args.host, args.port), Handler)
@@ -2475,6 +2559,11 @@ def main():
     httpd.openclaw_max_completion_tokens = args.openclaw_max_completion_tokens
     httpd.openclaw_session_prefix = args.openclaw_session_prefix
     httpd.openclaw_executor = ThreadPoolExecutor(max_workers=max(1, args.openclaw_workers), thread_name_prefix="openclaw")
+    httpd.realtime_manager = None
+    httpd.xiaozhi_ws_path = args.xiaozhi_ws_path
+    httpd.xiaozhi_ws_port = args.xiaozhi_ws_port or (args.port + 1)
+    httpd.xiaozhi_public_host = args.xiaozhi_public_host
+    httpd.xiaozhi_local_token = args.xiaozhi_local_token
     httpd.device_lock = threading.Lock()
     httpd.device_queues = {}
     httpd.last_ack = {}
@@ -2488,12 +2577,53 @@ def main():
         except Exception as exc:
             log_print(f"Wake reply audio pre-cache failed for {wake_reply_name}: {exc}", file=sys.stderr)
 
+    if args.realtime_enabled:
+        realtime_config = RealtimeConfig(
+            host=args.host,
+            port=httpd.xiaozhi_ws_port,
+            path=args.xiaozhi_ws_path,
+            token=args.xiaozhi_local_token,
+            region=args.region,
+            appkey=httpd.appkey,
+            token_getter=httpd.get_token,
+            aliyun_asr_ws_url=args.aliyun_asr_ws_url,
+            aliyun_tts_ws_url=args.aliyun_tts_ws_url,
+            voice=args.voice,
+            sample_rate=args.sample_rate,
+            volume=args.volume,
+            speech_rate=args.speech_rate,
+            pitch_rate=args.pitch_rate,
+            max_sentence_chars=args.max_sentence_chars,
+            openclaw_base_url=args.openclaw_base_url,
+            openclaw_token=args.openclaw_token,
+            openclaw_model=args.openclaw_model,
+            openclaw_backend_model=args.openclaw_backend_model,
+            openclaw_timeout=args.openclaw_timeout,
+            openclaw_session_prefix=args.openclaw_session_prefix,
+            openclaw_max_completion_tokens=args.openclaw_max_completion_tokens,
+            debug=args.debug,
+        )
+        httpd.realtime_manager = RealtimeManager(realtime_config, logger=log_print)
+        try:
+            httpd.realtime_manager.start()
+        except Exception as exc:
+            httpd.realtime_manager = None
+            log_print(f"Realtime server failed to start: {exc}", file=sys.stderr)
+
     log_print("Xiaopai server ready")
     log_print(f"  face detector: {args.face_detector}")
     log_print(f"  capture save mode: {args.capture_save_mode}")
     log_print(f"  visual tracking: {'enabled' if args.visual_tracking_enabled else 'disabled'}")
     log_print(f"  command queue: max_size={args.command_queue_max_size}")
     log_print(f"  OpenClaw: {'enabled' if httpd.openclaw_base_url and httpd.openclaw_token else 'disabled'}")
+    log_print(
+        "  Realtime: "
+        + (
+            f"enabled ws://{args.host}:{httpd.xiaozhi_ws_port}{args.xiaozhi_ws_path}"
+            if httpd.realtime_manager and httpd.realtime_manager.enabled
+            else "disabled"
+        )
+    )
     if args.debug:
         log_print("  debug: enabled")
         log_print(f"  health: http://127.0.0.1:{args.port}/health")
@@ -2514,12 +2644,19 @@ def main():
         )
         log_print(f"  OpenClaw detail: {httpd.openclaw_base_url or ''}")
         log_print(f"  OpenClaw workers: {args.openclaw_workers}")
+        if httpd.realtime_manager and httpd.realtime_manager.enabled:
+            log_print(f"  Xiaozhi OTA: http://{args.host}:{args.port}/xiaozhi/ota")
+            log_print(f"  Xiaozhi WS:  ws://{args.host}:{httpd.xiaozhi_ws_port}{args.xiaozhi_ws_path}")
         log_print(f"  TTS tail silence: {args.tts_tail_silence_ms}ms")
         log_print(f"  Command push via HTTP long poll:")
         log_print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")
         log_print(f"          send:   GET http://{args.host}:{args.port}/command/speak?device_id=...&text=...")
         log_print(f"  voice:  {args.voice}, pcm_s16le {args.sample_rate}Hz mono")
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        if httpd.realtime_manager:
+            httpd.realtime_manager.stop()
 
 
 if __name__ == "__main__":

@@ -1,2 +1,7 @@
 # Required runtime dependencies.
-# The default ASR/TTS/command server uses only Python standard library modules.
+# The legacy ASR/TTS/command server uses only Python standard library modules.
+#
+# Realtime xiaozhi bridge dependencies:
+websockets>=12.0
+websocket-client>=1.8.0
+opuslib>=3.0.1
