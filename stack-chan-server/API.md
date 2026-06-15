@@ -252,13 +252,19 @@ Response shape:
   "command": {
     "cmd_id": "cmd_xxxxxxxxxxxx",
     "type": "speak",
-    "priority": 0,
+    "priority": 10,
     "interrupt": true,
+    "ttl_seconds": 30.0,
+    "discardable": true,
+    "coalesce_key": "speak",
     "payload": {"text": "你好呀"},
     "created_at": 1710000000.0
   }
 }
 ```
+
+Commands can include `priority`, `interrupt`, `ttl_seconds`, `discardable`, and `coalesce_key`.
+Defaults prioritize `stop`, volume, camera/find-owner, and face updates above motion and speak.
 
 ## Stop
 

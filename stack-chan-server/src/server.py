@@ -6,9 +6,11 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import struct
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -18,7 +20,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from queue import Empty, Queue
+from queue import Empty
 
 from yunet_service import YunetFaceService
 
@@ -103,13 +105,54 @@ AVAILABLE_ACTIONS = (
     "happy_squint_dynamic",
 )
 
-HEAD_TOUCH_EVENT_TEXT = {
-    "wake_reply": "我在",
-    "press": "按压",
-    "click": "你好，我是小派同学",
-    "swipe_forward": "你好，我是小派同学",
-    "swipe_backward": "你好，我是小派同学",
+COMMAND_QUEUE_MAX_SIZE = 24
+COMMAND_DEFAULT_PRIORITIES = {
+    "stop": 100,
+    "volume": 90,
+    "sound": 90,
+    "find_owner": 85,
+    "locate_owner": 85,
+    "capture_image": 70,
+    "track_once": 70,
+    "camera": 70,
+    "face": 65,
+    "expression": 65,
+    "action": 65,
+    "motion": 45,
+    "move": 45,
+    "sequence": 30,
+    "speak": 10,
+    "play_audio": 10,
 }
+COMMAND_DEFAULT_TTL_SECONDS = {
+    "face": 8.0,
+    "expression": 8.0,
+    "action": 8.0,
+    "motion": 5.0,
+    "move": 5.0,
+    "speak": 30.0,
+    "sequence": 45.0,
+}
+COMMAND_COALESCE_BY_TYPE = {"face", "expression", "action", "motion", "move", "speak"}
+COMMAND_DISCARDABLE_TYPES = {"face", "expression", "action", "motion", "move", "speak", "sequence"}
+
+WAKE_REPLY_EVENTS = (
+    ("wake_reply", "我在。"),
+    ("wake_reply_help", "有什么要帮忙的"),
+    ("wake_reply_hello", "你好呀"),
+    ("wake_reply_here", "我在呢"),
+    ("wake_reply_xiaopai_here", "小派在呢"),
+)
+
+HEAD_TOUCH_EVENT_TEXT = {name: text for name, text in WAKE_REPLY_EVENTS}
+HEAD_TOUCH_EVENT_TEXT.update(
+    {
+        "press": "按压",
+        "click": "你好，我是小派同学",
+        "swipe_forward": "你好，我是小派同学",
+        "swipe_backward": "你好，我是小派同学",
+    }
+)
 
 XIAOPAI_OPENCLAW_SYSTEM_PROMPT = """你会收到“小派同学”（用户终端小机器人）的语音识别文本或设备事件。
 
@@ -465,6 +508,138 @@ def parse_voice_speak_command(text: str) -> dict | None:
     return None
 
 
+def command_default_priority(command_type: str) -> int:
+    return COMMAND_DEFAULT_PRIORITIES.get(str(command_type or ""), 20)
+
+
+def command_default_ttl(command_type: str) -> float:
+    return COMMAND_DEFAULT_TTL_SECONDS.get(str(command_type or ""), 60.0)
+
+
+def command_is_discardable(command: dict) -> bool:
+    if "discardable" in command:
+        return bool(command.get("discardable"))
+    return str(command.get("type") or "") in COMMAND_DISCARDABLE_TYPES
+
+
+def command_coalesce_key(command: dict) -> str:
+    key = str(command.get("coalesce_key") or "").strip()
+    if key:
+        return key
+    command_type = str(command.get("type") or "")
+    if command_type in COMMAND_COALESCE_BY_TYPE:
+        return command_type
+    return ""
+
+
+class DeviceCommandQueue:
+    def __init__(self, max_size: int = COMMAND_QUEUE_MAX_SIZE):
+        self.max_size = max(1, int(max_size))
+        self._items = []
+        self._seq = 0
+        self._cv = threading.Condition()
+
+    def qsize(self) -> int:
+        with self._cv:
+            self._drop_expired_locked(time.time())
+            return len(self._items)
+
+    def put(self, command: dict) -> dict:
+        now = time.time()
+        command_type = str(command.get("type") or "")
+        priority = max(int(command.get("priority") or 0), command_default_priority(command_type))
+        ttl = float(command.get("ttl_seconds") or command_default_ttl(command_type))
+        expires_at = now + ttl if ttl > 0 else 0.0
+        item = {
+            "command": command,
+            "priority": priority,
+            "seq": self._seq,
+            "expires_at": expires_at,
+            "coalesce_key": command_coalesce_key(command),
+            "discardable": command_is_discardable(command),
+        }
+
+        with self._cv:
+            self._seq += 1
+            stats = {"queued": False, "expired": self._drop_expired_locked(now), "preempted": 0, "coalesced": 0, "dropped": 0}
+
+            if command.get("interrupt"):
+                kept = []
+                for existing in self._items:
+                    if existing["priority"] <= priority or existing["discardable"]:
+                        stats["preempted"] += 1
+                    else:
+                        kept.append(existing)
+                self._items = kept
+
+            if item["coalesce_key"]:
+                kept = []
+                for existing in self._items:
+                    if existing["coalesce_key"] == item["coalesce_key"] and existing["priority"] <= priority:
+                        stats["coalesced"] += 1
+                    else:
+                        kept.append(existing)
+                self._items = kept
+
+            while len(self._items) >= self.max_size:
+                drop_index = self._find_drop_index_locked(priority)
+                if drop_index is None:
+                    stats["dropped"] += 1
+                    return stats
+                self._items.pop(drop_index)
+                stats["dropped"] += 1
+
+            self._items.append(item)
+            stats["queued"] = True
+            self._cv.notify()
+            return stats
+
+    def get(self, timeout: float | None = None) -> dict:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._cv:
+            while True:
+                self._drop_expired_locked(time.time())
+                if self._items:
+                    index = max(range(len(self._items)), key=lambda i: (self._items[i]["priority"], -self._items[i]["seq"]))
+                    return self._items.pop(index)["command"]
+                if timeout == 0:
+                    raise Empty
+                if deadline is None:
+                    self._cv.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Empty
+                self._cv.wait(remaining)
+
+    def get_nowait(self) -> dict:
+        return self.get(timeout=0)
+
+    def _drop_expired_locked(self, now: float) -> int:
+        before = len(self._items)
+        self._items = [
+            item for item in self._items if item["expires_at"] <= 0 or item["expires_at"] > now
+        ]
+        return before - len(self._items)
+
+    def _find_drop_index_locked(self, incoming_priority: int) -> int | None:
+        discardable = [
+            (item["priority"], item["seq"], index)
+            for index, item in enumerate(self._items)
+            if item["discardable"] and item["priority"] <= incoming_priority
+        ]
+        if discardable:
+            return min(discardable)[2]
+        lower_or_equal = [
+            (item["priority"], item["seq"], index)
+            for index, item in enumerate(self._items)
+            if item["priority"] <= incoming_priority
+        ]
+        if lower_or_equal:
+            return min(lower_or_equal)[2]
+        return None
+
+
 class AliyunVoiceServer(ThreadingHTTPServer):
     token: str
     token_expire_time: int
@@ -484,6 +659,8 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     tts_request_timeout: int
     tts_retries: int
     tts_tail_silence_ms: int
+    capture_save_mode: str
+    command_queue_max_size: int
     capture_dir: str
     static_dir: str
     openclaw_base_url: str
@@ -493,7 +670,9 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     openclaw_timeout: int
     openclaw_max_completion_tokens: int
     openclaw_session_prefix: str
+    openclaw_executor: ThreadPoolExecutor
     debug_log: bool
+    device_lock: threading.Lock
     face_detector_backend: str
     face_detector: YunetFaceService | None
     visual_tracking_enabled: bool
@@ -511,7 +690,7 @@ class AliyunVoiceServer(ThreadingHTTPServer):
     find_owner_gain_x: float
     find_owner_gain_y: float
     find_owner_stop_pixels: float
-    device_queues: dict[str, Queue]
+    device_queues: dict[str, DeviceCommandQueue]
     last_ack: dict[str, dict]
     last_seen: dict[str, float]
     device_order: list[str]
@@ -588,6 +767,12 @@ class Handler(BaseHTTPRequestHandler):
                         "enabled": self._openclaw_enabled(),
                         "base_url": self.server.openclaw_base_url,
                         "model": self.server.openclaw_model,
+                    },
+                    "command_queue": {
+                        "max_size": self.server.command_queue_max_size,
+                        "default_priorities": COMMAND_DEFAULT_PRIORITIES,
+                        "coalesced_types": sorted(COMMAND_COALESCE_BY_TYPE),
+                        "discardable_types": sorted(COMMAND_DISCARDABLE_TYPES),
                     },
                 }
             )
@@ -745,7 +930,7 @@ class Handler(BaseHTTPRequestHandler):
                 response["handled_as"] = "volume_adjust"
                 response["dialog_awake"] = self._dialog_awake(device_id)
                 response["queued_command"] = command["cmd_id"]
-                response["volume_direction"] = volume_command["direction"]
+                response["volume_direction"] = volume_command.get("direction") or volume_command.get("mode") or "set"
                 self._send_json(response)
                 return
 
@@ -760,20 +945,35 @@ class Handler(BaseHTTPRequestHandler):
             if woke_by_word:
                 self._wake_dialog(device_id, reason=text)
                 response["woke_by"] = "wake_word"
-                command = make_command(
+                wake_reply_name, wake_reply_text = random.choice(WAKE_REPLY_EVENTS)
+                wake_reply_command = make_command(
+                    "speak",
+                    {"text": wake_reply_text, "pause_listener": True, "cache_name": wake_reply_name},
+                    priority=95,
+                    interrupt=True,
+                    ttl_seconds=8,
+                    discardable=False,
+                    coalesce_key="wake_reply",
+                )
+                find_owner_command = make_command(
                     "find_owner",
                     {
                         "rounds": 1,
-                        "reply": "我在",
+                        "reply": "",
+                        "preserve_speech": True,
+                        "wait_for_speech": False,
                         "gain_x": self.server.find_owner_gain_x,
                         "gain_y": self.server.find_owner_gain_y,
                         "stop_pixels": self.server.find_owner_stop_pixels,
                     },
-                    priority=1,
+                    priority=85,
                     interrupt=True,
                 )
-                self._enqueue_command(device_id, command)
-                response["queued_command"] = command["cmd_id"]
+                self._enqueue_command(device_id, wake_reply_command)
+                self._enqueue_command(device_id, find_owner_command)
+                response["queued_command"] = wake_reply_command["cmd_id"]
+                response["queued_commands"] = [wake_reply_command["cmd_id"], find_owner_command["cmd_id"]]
+                response["wake_reply"] = {"name": wake_reply_name, "text": wake_reply_text}
                 if is_wake_only_text(text):
                     response["handled_as"] = "wake"
                     response["dialog_awake"] = True
@@ -868,12 +1068,15 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_devices(self):
         now = time.time()
         devices = []
-        known_device_ids = list(self.server.device_order)
-        for device_id in self.server.last_seen:
-            if device_id not in self.server.device_order:
+        with self.server.device_lock:
+            known_device_ids = list(self.server.device_order)
+            last_seen_snapshot = dict(self.server.last_seen)
+            last_ack_snapshot = dict(self.server.last_ack)
+        for device_id in last_seen_snapshot:
+            if device_id not in known_device_ids:
                 known_device_ids.append(device_id)
         for device_id in known_device_ids:
-            seen = self.server.last_seen.get(device_id)
+            seen = last_seen_snapshot.get(device_id)
             if seen is None:
                 continue
             queue = self._queue_for(device_id)
@@ -883,14 +1086,14 @@ class Handler(BaseHTTPRequestHandler):
                     "last_seen_seconds_ago": round(now - seen, 1),
                     "online": now - seen <= DEVICE_ONLINE_TTL_SECONDS,
                     "pending_commands": queue.qsize(),
-                    "last_ack": self.server.last_ack.get(device_id),
+                    "last_ack": last_ack_snapshot.get(device_id),
                 }
             )
         self._send_json(
             {
                 "type": "devices",
                 "default_device_id": first_connected_device_id(
-                    self.server.last_seen, self.server.device_order
+                    last_seen_snapshot, known_device_ids
                 ),
                 "online_ttl_seconds": DEVICE_ONLINE_TTL_SECONDS,
                 "devices": devices,
@@ -904,6 +1107,18 @@ class Handler(BaseHTTPRequestHandler):
         command_type = command_type or first_value(query, "type") or posted.get("type") or "speak"
         priority = int(first_value(query, "priority") or posted.get("priority") or 0)
         interrupt = parse_bool(first_value(query, "interrupt") or posted.get("interrupt") or "false")
+        ttl_raw = first_value(query, "ttl_seconds") or posted.get("ttl_seconds")
+        ttl_seconds = float(ttl_raw) if ttl_raw not in (None, "") else None
+        discardable_raw = first_value(query, "discardable")
+        discardable = None
+        if discardable_raw:
+            discardable = parse_bool(discardable_raw)
+        elif "discardable" in posted:
+            posted_discardable = posted.get("discardable")
+            discardable = (
+                parse_bool(posted_discardable) if isinstance(posted_discardable, str) else bool(posted_discardable)
+            )
+        coalesce_key = first_value(query, "coalesce_key") or str(posted.get("coalesce_key") or "")
 
         if "payload" in posted and isinstance(posted["payload"], (dict, list)):
             payload = posted["payload"]
@@ -920,9 +1135,17 @@ class Handler(BaseHTTPRequestHandler):
             for step in payload:
                 if isinstance(step, dict) and step.get("type") == "face":
                     step["expression"] = normalize_expression_name(step.get("expression") or step.get("face") or "calm")
-        command = make_command(command_wire_type, payload, priority=priority, interrupt=interrupt)
-        self._enqueue_command(device_id, command)
-        self._send_json({"type": "queued", "device_id": device_id, "command": command})
+        command = make_command(
+            command_wire_type,
+            payload,
+            priority=priority,
+            interrupt=interrupt,
+            ttl_seconds=ttl_seconds,
+            discardable=discardable,
+            coalesce_key=coalesce_key,
+        )
+        queued = self._enqueue_command(device_id, command)
+        self._send_json({"type": "queued" if queued else "dropped", "device_id": device_id, "command": command})
 
     def _handle_face_shortcut(self, query: dict, expression: str, action_only: bool = False):
         expression = normalize_expression_name(expression)
@@ -953,10 +1176,10 @@ class Handler(BaseHTTPRequestHandler):
         priority = int(first_value(query, "priority") or 0)
         interrupt = parse_bool(first_value(query, "interrupt") or "false")
         command = make_command("face", {"expression": expression}, priority=priority, interrupt=interrupt)
-        self._enqueue_command(device_id, command)
+        queued = self._enqueue_command(device_id, command)
         self._send_json(
             {
-                "type": "queued",
+                "type": "queued" if queued else "dropped",
                 "device_id": device_id,
                 "expression": expression,
                 "kind": "action" if expression in AVAILABLE_ACTIONS else "expression",
@@ -993,7 +1216,8 @@ class Handler(BaseHTTPRequestHandler):
             "message": first_value(query, "message") or posted.get("message", ""),
             "ts": time.time(),
         }
-        self.server.last_ack[device_id] = ack
+        with self.server.device_lock:
+            self.server.last_ack[device_id] = ack
         self._mark_device_seen(device_id)
         self._send_json({"type": "ack", "device_id": device_id, "ack": ack})
 
@@ -1004,54 +1228,55 @@ class Handler(BaseHTTPRequestHandler):
     def _resolve_command_device_id(self, requested_device_id: str) -> str:
         device_id = safe_device_id(requested_device_id)
         if is_placeholder_device_id(device_id):
-            first_connected = first_connected_device_id(self.server.last_seen, self.server.device_order)
+            with self.server.device_lock:
+                first_connected = first_connected_device_id(self.server.last_seen, self.server.device_order)
             if first_connected:
                 return first_connected
         return device_id
 
-    def _queue_for(self, device_id: str) -> Queue:
-        queue = self.server.device_queues.get(device_id)
-        if queue is None:
-            queue = Queue()
-            self.server.device_queues[device_id] = queue
-        return queue
+    def _queue_for(self, device_id: str) -> DeviceCommandQueue:
+        with self.server.device_lock:
+            queue = self.server.device_queues.get(device_id)
+            if queue is None:
+                queue = DeviceCommandQueue(self.server.command_queue_max_size)
+                self.server.device_queues[device_id] = queue
+            return queue
 
-    def _enqueue_command(self, device_id: str, command: dict) -> None:
+    def _enqueue_command(self, device_id: str, command: dict) -> bool:
         device_id = safe_device_id(device_id)
         queue = self._queue_for(device_id)
-        cleared = 0
-        if command.get("interrupt"):
-            while True:
-                try:
-                    queue.get_nowait()
-                    cleared += 1
-                except Empty:
-                    break
-        queue.put(command)
+        stats = queue.put(command)
         detail = ""
         if command.get("type") == "face" and isinstance(command.get("payload"), dict):
             detail = f" expression={command['payload'].get('expression', '')}"
-        self._log_info(f"Command queued: {command['type']}{detail}")
+        if stats.get("queued"):
+            self._log_info(f"Command queued: {command['type']}{detail} priority={command.get('priority')}")
+        else:
+            self._log_info(f"Command dropped: {command['type']}{detail} priority={command.get('priority')}")
         self._log_debug(
-            f"Command queued detail: device={device_id} cmd_id={command['cmd_id']} "
-            f"type={command['type']}{detail} cleared={cleared}"
+            f"Command queue detail: device={device_id} cmd_id={command['cmd_id']} "
+            f"type={command['type']}{detail} stats={stats}"
         )
+        return bool(stats.get("queued"))
 
     def _mark_device_seen(self, device_id: str) -> None:
         device_id = safe_device_id(device_id)
-        if device_id not in self.server.device_order:
-            self.server.device_order.append(device_id)
-        self.server.last_seen[device_id] = time.time()
+        with self.server.device_lock:
+            if device_id not in self.server.device_order:
+                self.server.device_order.append(device_id)
+            self.server.last_seen[device_id] = time.time()
 
     def _dialog_awake(self, device_id: str) -> bool:
         device_id = safe_device_id(device_id)
         if self._expire_dialog_if_needed(device_id):
             return False
-        return time.time() < self.server.dialog_awake_until.get(device_id, 0)
+        with self.server.device_lock:
+            return time.time() < self.server.dialog_awake_until.get(device_id, 0)
 
     def _expire_dialog_if_needed(self, device_id: str) -> bool:
         device_id = safe_device_id(device_id)
-        awake_until = self.server.dialog_awake_until.get(device_id, 0)
+        with self.server.device_lock:
+            awake_until = self.server.dialog_awake_until.get(device_id, 0)
         if awake_until > 0 and time.time() >= awake_until:
             self._sleep_dialog(device_id, reason="timeout")
             return True
@@ -1059,13 +1284,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _wake_dialog(self, device_id: str, reason: str = "") -> None:
         device_id = safe_device_id(device_id)
-        self.server.dialog_awake_until[device_id] = time.time() + DIALOG_AWAKE_SECONDS
+        with self.server.device_lock:
+            self.server.dialog_awake_until[device_id] = time.time() + DIALOG_AWAKE_SECONDS
         self._log_info("Dialog awake")
         self._log_debug(f"Dialog awake detail: device={device_id} ttl={DIALOG_AWAKE_SECONDS}s reason={reason!r}")
 
     def _sleep_dialog(self, device_id: str, reason: str = "") -> None:
         device_id = safe_device_id(device_id)
-        self.server.dialog_awake_until[device_id] = 0
+        with self.server.device_lock:
+            self.server.dialog_awake_until[device_id] = 0
         self._enqueue_command(device_id, make_command("face", {"expression": "calm"}, priority=1, interrupt=True))
         self._log_info("Dialog sleep")
         self._log_debug(f"Dialog sleep detail: device={device_id} reason={reason!r}")
@@ -1077,21 +1304,19 @@ class Handler(BaseHTTPRequestHandler):
         if not self._openclaw_enabled():
             return {"openclaw_enabled": False, "openclaw_sent": False, "queued_commands": []}
 
-        try:
-            self._call_openclaw(device_id, event_type, details)
-        except Exception as exc:
-            self._log_error(f"OpenClaw event failed: {exc}")
-            self._log_debug(f"OpenClaw event failed detail: device={device_id} event={event_type} error={exc}")
-            return {
-                "openclaw_enabled": True,
-                "openclaw_sent": False,
-                "openclaw_error": str(exc),
-                "queued_commands": [],
-            }
+        def run_event() -> None:
+            try:
+                self._call_openclaw(device_id, event_type, details)
+            except Exception as exc:
+                self._log_error(f"OpenClaw event failed: {exc}")
+                self._log_debug(f"OpenClaw event failed detail: device={device_id} event={event_type} error={exc}")
 
+        self.server.openclaw_executor.submit(run_event)
+        self._log_info(f"OpenClaw event submitted: {event_type}")
         return {
             "openclaw_enabled": True,
             "openclaw_sent": True,
+            "openclaw_async": True,
             "queued_commands": [],
         }
 
@@ -1232,11 +1457,16 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs(self.server.capture_dir, exist_ok=True)
         stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         base = os.path.join(self.server.capture_dir, f"xiaopai-{safe_device}-{stamp}")
+        save_mode = getattr(self.server, "capture_save_mode", "raw")
+        save_raw = save_mode in ("raw", "debug") or self.server.face_detector_backend == "legacy"
+        save_debug = save_mode == "debug" or self.server.face_detector_backend == "legacy"
+        save_visual = save_mode == "debug"
 
         raw_ext = "jpg" if content_type.startswith("image/jpeg") else (image_format or "bin")
-        raw_path = f"{base}.{raw_ext}"
-        with open(raw_path, "wb") as fp:
-            fp.write(body)
+        raw_path = f"{base}.{raw_ext}" if save_raw else ""
+        if raw_path:
+            with open(raw_path, "wb") as fp:
+                fp.write(body)
 
         bmp_path = ""
         png_path = ""
@@ -1254,19 +1484,32 @@ class Handler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
                 return
-            bmp_path = f"{base}.bmp"
-            with open(bmp_path, "wb") as fp:
-                fp.write(rgb565_to_bmp(body, width, height))
-            png_path = f"{base}.png"
-            with open(png_path, "wb") as fp:
-                fp.write(rgb565_to_png(body, width, height))
+            if save_debug:
+                bmp_path = f"{base}.bmp"
+                with open(bmp_path, "wb") as fp:
+                    fp.write(rgb565_to_bmp(body, width, height))
+                png_path = f"{base}.png"
+                with open(png_path, "wb") as fp:
+                    fp.write(rgb565_to_png(body, width, height))
             if self.server.face_detector is not None:
-                face_visual_path, face_result = self.server.face_detector.detect_rgb565(body, width, height, f"{base}.faces.jpg")
+                face_visual_path, face_result = self.server.face_detector.detect_rgb565(
+                    body,
+                    width,
+                    height,
+                    f"{base}.faces.jpg" if save_visual else "",
+                )
             elif self.server.face_detector_backend == "legacy":
+                if not png_path:
+                    png_path = f"{base}.png"
+                    with open(png_path, "wb") as fp:
+                        fp.write(rgb565_to_png(body, width, height))
                 face_visual_path, face_result = detect_and_visualize_faces(png_path, f"{base}.faces.png")
         elif content_type.startswith("image/jpeg"):
             if self.server.face_detector is not None:
-                face_visual_path, face_result = self.server.face_detector.detect_jpeg(body, f"{base}.faces.jpg")
+                face_visual_path, face_result = self.server.face_detector.detect_jpeg(
+                    body,
+                    f"{base}.faces.jpg" if save_visual else "",
+                )
             elif self.server.face_detector_backend == "legacy":
                 face_visual_path, face_result = detect_and_visualize_faces(raw_path, f"{base}.faces.png")
 
@@ -1823,12 +2066,31 @@ def first_connected_device_id(
     return "default"
 
 
-def make_command(command_type: str, payload, priority: int = 0, interrupt: bool = False) -> dict:
+def make_command(
+    command_type: str,
+    payload,
+    priority: int = 0,
+    interrupt: bool = False,
+    ttl_seconds: float | None = None,
+    discardable: bool | None = None,
+    coalesce_key: str = "",
+) -> dict:
+    normalized_type = str(command_type or "")
+    effective_priority = max(int(priority or 0), command_default_priority(normalized_type))
+    if ttl_seconds is None:
+        ttl_seconds = command_default_ttl(normalized_type)
+    if discardable is None:
+        discardable = normalized_type in COMMAND_DISCARDABLE_TYPES
+    if not coalesce_key and normalized_type in COMMAND_COALESCE_BY_TYPE:
+        coalesce_key = normalized_type
     return {
         "cmd_id": f"cmd_{uuid.uuid4().hex[:12]}",
-        "type": command_type,
-        "priority": priority,
-        "interrupt": interrupt,
+        "type": normalized_type,
+        "priority": effective_priority,
+        "interrupt": bool(interrupt or normalized_type == "stop"),
+        "ttl_seconds": ttl_seconds,
+        "discardable": bool(discardable),
+        "coalesce_key": coalesce_key,
         "payload": payload,
         "created_at": time.time(),
     }
@@ -1846,7 +2108,7 @@ def command_payload_from_query(command_type: str, query: dict):
         direction = first_value(query, "direction") or first_value(query, "action") or first_value(query, "type") or "up"
         mode = first_value(query, "mode") or ""
         value = first_value(query, "value")
-        if mode == "set" or value is not None:
+        if mode == "set" or value:
             return {
                 "mode": "set",
                 "value": int(value or "100"),
@@ -1874,6 +2136,8 @@ def command_payload_from_query(command_type: str, query: dict):
         return {
             "rounds": int(first_value(query, "rounds") or "1"),
             "reply": first_value(query, "reply") or "我在",
+            "preserve_speech": parse_bool(first_value(query, "preserve_speech") or "false"),
+            "wait_for_speech": parse_bool(first_value(query, "wait_for_speech") or "false"),
             "gain_x": float(first_value(query, "gain_x") or "1.0"),
             "gain_y": float(first_value(query, "gain_y") or "0.8"),
             "stop_pixels": float(first_value(query, "stop_pixels") or "32"),
@@ -2024,7 +2288,14 @@ def main():
     parser.add_argument("--tts-request-timeout", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_TTS_REQUEST_TIMEOUT", "12")))
     parser.add_argument("--tts-retries", type=int, default=int(os.environ.get("STACKCHAN_ALIYUN_TTS_RETRIES", "2")))
     parser.add_argument("--tts-tail-silence-ms", type=int, default=int(os.environ.get("STACKCHAN_TTS_TAIL_SILENCE_MS", "350")))
+    parser.add_argument("--command-queue-max-size", type=int, default=int(os.environ.get("STACKCHAN_COMMAND_QUEUE_MAX_SIZE", str(COMMAND_QUEUE_MAX_SIZE))))
     parser.add_argument("--capture-dir", default=os.environ.get("STACKCHAN_CAPTURE_DIR", "captures"))
+    parser.add_argument(
+        "--capture-save-mode",
+        choices=("none", "raw", "debug"),
+        default=os.environ.get("STACKCHAN_CAPTURE_SAVE_MODE", "none"),
+        help="Image upload persistence: none, raw, or debug (raw + converted images + face visualizations).",
+    )
     parser.add_argument("--static-dir", default=os.environ.get("STACKCHAN_STATIC_DIR", "static"))
     parser.add_argument(
         "--face-detector",
@@ -2131,6 +2402,7 @@ def main():
     parser.add_argument("--openclaw-model", default=os.environ.get("STACKCHAN_OPENCLAW_MODEL", "openclaw/default"))
     parser.add_argument("--openclaw-backend-model", default=os.environ.get("STACKCHAN_OPENCLAW_BACKEND_MODEL", ""))
     parser.add_argument("--openclaw-timeout", type=int, default=int(os.environ.get("STACKCHAN_OPENCLAW_TIMEOUT", "45")))
+    parser.add_argument("--openclaw-workers", type=int, default=int(os.environ.get("STACKCHAN_OPENCLAW_WORKERS", "4")))
     parser.add_argument(
         "--openclaw-max-completion-tokens",
         type=int,
@@ -2166,6 +2438,8 @@ def main():
     httpd.tts_request_timeout = args.tts_request_timeout
     httpd.tts_retries = args.tts_retries
     httpd.tts_tail_silence_ms = args.tts_tail_silence_ms
+    httpd.command_queue_max_size = args.command_queue_max_size
+    httpd.capture_save_mode = args.capture_save_mode
     httpd.debug_log = args.debug
     httpd.capture_dir = args.capture_dir
     httpd.static_dir = args.static_dir
@@ -2200,20 +2474,25 @@ def main():
     httpd.openclaw_timeout = args.openclaw_timeout
     httpd.openclaw_max_completion_tokens = args.openclaw_max_completion_tokens
     httpd.openclaw_session_prefix = args.openclaw_session_prefix
+    httpd.openclaw_executor = ThreadPoolExecutor(max_workers=max(1, args.openclaw_workers), thread_name_prefix="openclaw")
+    httpd.device_lock = threading.Lock()
     httpd.device_queues = {}
     httpd.last_ack = {}
     httpd.last_seen = {}
     httpd.device_order = []
     httpd.dialog_awake_until = {}
 
-    try:
-        ensure_event_audio_cache(httpd, "wake_reply")
-    except Exception as exc:
-        log_print(f"Wake reply audio pre-cache failed: {exc}", file=sys.stderr)
+    for wake_reply_name, _ in WAKE_REPLY_EVENTS:
+        try:
+            ensure_event_audio_cache(httpd, wake_reply_name)
+        except Exception as exc:
+            log_print(f"Wake reply audio pre-cache failed for {wake_reply_name}: {exc}", file=sys.stderr)
 
     log_print("Xiaopai server ready")
     log_print(f"  face detector: {args.face_detector}")
+    log_print(f"  capture save mode: {args.capture_save_mode}")
     log_print(f"  visual tracking: {'enabled' if args.visual_tracking_enabled else 'disabled'}")
+    log_print(f"  command queue: max_size={args.command_queue_max_size}")
     log_print(f"  OpenClaw: {'enabled' if httpd.openclaw_base_url and httpd.openclaw_token else 'disabled'}")
     if args.debug:
         log_print("  debug: enabled")
@@ -2234,6 +2513,7 @@ def main():
             f"stop={args.find_owner_stop_pixels}px"
         )
         log_print(f"  OpenClaw detail: {httpd.openclaw_base_url or ''}")
+        log_print(f"  OpenClaw workers: {args.openclaw_workers}")
         log_print(f"  TTS tail silence: {args.tts_tail_silence_ms}ms")
         log_print(f"  Command push via HTTP long poll:")
         log_print(f"          device: GET http://{args.host}:{args.port}/device/next-command?device_id=...")

@@ -46,7 +46,8 @@ void run_tracking_user_demo();
 static bool wifi_is_connected();
 static void show_expression(const char* expression);
 static bool execute_speak_command(const char* text);
-static bool execute_speak_command_internal(const char* text, bool pause_voice_listener);
+static bool execute_speak_command_internal(const char* text, bool pause_voice_listener, const char* cache_name = nullptr);
+static void request_speak_preempt(const char* reason);
 
 extern const uint8_t calm_face_png_start[] asm("_binary_calm_face_png_start");
 extern const uint8_t calm_face_png_end[] asm("_binary_calm_face_png_end");
@@ -107,6 +108,7 @@ static constexpr int kVoiceStartThreshold = CONFIG_STACKCHAN_VOICE_START_THRESHO
 static constexpr int kVoiceStopThreshold = CONFIG_STACKCHAN_VOICE_STOP_THRESHOLD;
 static constexpr int kRecordMaxMs = CONFIG_STACKCHAN_RECORD_MAX_MS;
 static constexpr int kSilenceStopMs = CONFIG_STACKCHAN_SILENCE_STOP_MS;
+static constexpr int kVoiceListenerReleaseWaitMs = 1000;
 static constexpr int kTtsStreamSampleRate = 16000;
 static constexpr size_t kTtsStreamBufferSamples = 2048;
 static constexpr int kLauncherAppCount = 5;
@@ -175,6 +177,9 @@ static constexpr uint32_t kHeadTouchClickMaxMs = 650;
 static constexpr int16_t kHeadTouchSwipeThreshold = 40;
 static constexpr uint32_t kHeadTouchTaskStackBytes = 6 * 1024;
 static constexpr uint32_t kHeadTouchAudioTaskStackBytes = 16 * 1024;
+static constexpr uint32_t kSpeakCommandTaskStackBytes = 16 * 1024;
+static constexpr size_t kSpeakCommandMaxTextBytes = 512;
+static constexpr size_t kSpeakCommandCacheNameBytes = 64;
 static constexpr uint32_t kSpeakerDrainMs = 500;
 static constexpr int kSpeakerVolumePercentMin = 10;
 static constexpr int kSpeakerVolumePercentMax = 100;
@@ -204,10 +209,12 @@ TaskHandle_t speak_animation_task_handle = nullptr;
 TaskHandle_t expression_animation_task_handle = nullptr;
 TaskHandle_t head_touch_task_handle = nullptr;
 TaskHandle_t head_touch_audio_task_handle = nullptr;
+TaskHandle_t speak_command_task_handle = nullptr;
 EventGroupHandle_t wifi_event_group = nullptr;
 SemaphoreHandle_t m5_mutex = nullptr;
 SemaphoreHandle_t audio_mutex = nullptr;
 QueueHandle_t head_touch_event_queue = nullptr;
+QueueHandle_t speak_command_queue = nullptr;
 int wifi_retry_count = 0;
 bool wifi_started = false;
 bool wifi_connect_requested = false;
@@ -217,8 +224,11 @@ volatile bool app2_stop_requested = false;
 volatile bool tracking_stop_requested = false;
 volatile bool voice_listener_paused = false;
 volatile bool voice_status_screen_suppressed = false;
+volatile bool speech_playback_active = false;
+volatile bool speech_expression_overridden = false;
 volatile bool speak_animation_running = false;
 volatile bool expression_animation_running = false;
+volatile bool speak_command_active = false;
 bool camera_initialized = false;
 volatile bool camera_owns_internal_i2c = false;
 bool servo_uart_initialized = false;
@@ -249,6 +259,13 @@ enum class HeadTouchEvent : uint8_t {
     Click,
     SwipeForward,
     SwipeBackward,
+};
+
+struct SpeakCommandItem {
+    char cmd_id[40];
+    char text[kSpeakCommandMaxTextBytes];
+    char cache_name[kSpeakCommandCacheNameBytes];
+    bool pause_voice_listener;
 };
 
 struct WifiCandidate {
@@ -2788,6 +2805,7 @@ static void run_local_record_upload_loop()
             ESP_LOGI(TAG, "Voice threshold triggered: level=%ld smooth=%ld start=%d stop=%d pre_roll=%ums sample_rate=%d",
                      static_cast<long>(level), static_cast<long>(smooth_level), kVoiceStartThreshold,
                      kVoiceStopThreshold, kPreRollMs, kRecordSampleRate);
+            request_speak_preempt("voice activity");
             auto pcm = record_pcm_after_trigger(pre_roll, smooth_level);
             if (!pcm.empty() && !app1_stop_requested && !voice_listener_paused) {
                 upload_wav_recording(pcm);
@@ -2810,7 +2828,7 @@ static void pause_voice_listener_for_shared_peripherals(const char* reason)
     voice_listener_paused = true;
     ESP_LOGI(TAG, "Voice listener pause requested: %s", reason != nullptr ? reason : "shared peripheral use");
 
-    const int max_wait_ms = 2500;
+    const int max_wait_ms = kVoiceListenerReleaseWaitMs;
     int waited_ms = 0;
     while (xiaozhi_task_handle != nullptr && M5.Mic.isEnabled() && waited_ms < max_wait_ms) {
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -3625,7 +3643,8 @@ static bool refine_head_toward_face(const FaceTarget& target, uint16_t duration_
 }
 
 static bool run_find_owner_command(int rounds, const char* reply, float gain_x = kFindOwnerYawGain,
-                                   float gain_y = kFindOwnerPitchGain, float stop_pixels = kFindOwnerStopPixels)
+                                   float gain_y = kFindOwnerPitchGain, float stop_pixels = kFindOwnerStopPixels,
+                                   bool preserve_speech_playback = false, bool wait_for_speech = false)
 {
     ensure_client_id();
     if (!ensure_wifi_connected()) {
@@ -3635,9 +3654,25 @@ static bool run_find_owner_command(int rounds, const char* reply, float gain_x =
         return false;
     }
 
+    if (wait_for_speech) {
+        const int max_wait_ms = 3000;
+        int waited_ms = 0;
+        while ((speak_command_active || speech_playback_active || speak_animation_task_handle != nullptr ||
+                (speak_command_queue != nullptr && uxQueueMessagesWaiting(speak_command_queue) > 0)) &&
+               waited_ms < max_wait_ms) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            waited_ms += 20;
+        }
+        ESP_LOGI(TAG, "Find owner waited for speech: %dms", waited_ms);
+    }
+
     VoiceListenerPauseGuard voice_pause("find owner");
-    M5.Speaker.stop();
-    M5.Speaker.end();
+    if (preserve_speech_playback) {
+        ESP_LOGI(TAG, "Find owner preserving speech playback");
+    } else {
+        request_speak_preempt("find owner");
+        M5.Speaker.end();
+    }
 
     int capped_rounds = std::max(1, std::min(rounds, kFindOwnerMaxRounds));
     gain_x = std::max(0.0f, gain_x);
@@ -3677,7 +3712,10 @@ static bool run_find_owner_command(int rounds, const char* reply, float gain_x =
     }
 
     ESP_LOGI(TAG, "Find owner finished: saw_face=%d aligned=%d", saw_face, aligned);
-    return execute_speak_command_internal(reply != nullptr && reply[0] != '\0' ? reply : "我在", false);
+    if (reply != nullptr && reply[0] != '\0') {
+        return execute_speak_command_internal(reply, false);
+    }
+    return saw_face;
 }
 
 void run_camera_upload_app()
@@ -4062,6 +4100,29 @@ static bool stream_cached_reply_pcm(const char* cache_name, const char* label)
     return stream_pcm_url(url, label, false);
 }
 
+static const char* cached_wake_reply_name_for_text(const char* text)
+{
+    if (text == nullptr) {
+        return "";
+    }
+    if (strcmp(text, "我在") == 0 || strcmp(text, "我在。") == 0) {
+        return "wake_reply";
+    }
+    if (strcmp(text, "有什么要帮忙的") == 0) {
+        return "wake_reply_help";
+    }
+    if (strcmp(text, "你好呀") == 0) {
+        return "wake_reply_hello";
+    }
+    if (strcmp(text, "我在呢") == 0) {
+        return "wake_reply_here";
+    }
+    if (strcmp(text, "小派在呢") == 0) {
+        return "wake_reply_xiaopai_here";
+    }
+    return "";
+}
+
 static bool stream_tts_pcm()
 {
     return stream_tts_pcm_for_text(CONFIG_STACKCHAN_TTS_TEXT);
@@ -4139,6 +4200,22 @@ static double json_number_value(const cJSON* root, const char* key, double defau
 {
     const cJSON* value = cJSON_GetObjectItemCaseSensitive(root, key);
     return cJSON_IsNumber(value) ? value->valuedouble : default_value;
+}
+
+static bool json_bool_value(const cJSON* root, const char* key, bool default_value)
+{
+    const cJSON* value = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (cJSON_IsBool(value)) {
+        return cJSON_IsTrue(value);
+    }
+    if (cJSON_IsNumber(value)) {
+        return value->valuedouble != 0;
+    }
+    if (cJSON_IsString(value)) {
+        return strcmp(value->valuestring, "1") == 0 || strcmp(value->valuestring, "true") == 0 ||
+               strcmp(value->valuestring, "yes") == 0 || strcmp(value->valuestring, "on") == 0;
+    }
+    return default_value;
 }
 
 static bool send_command_ack(const char* cmd_id, const char* status, const char* message = "")
@@ -4289,10 +4366,22 @@ static void stop_speaking_animation()
     for (int i = 0; i < 30 && speak_animation_task_handle != nullptr; ++i) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    if (speech_expression_overridden) {
+        speech_expression_overridden = false;
+        return;
+    }
     show_expression(kDefaultExpression);
 }
 
-static bool execute_speak_command_internal(const char* text, bool pause_voice_listener)
+static void request_speak_preempt(const char* reason)
+{
+    app2_stop_requested = true;
+    M5.Speaker.stop();
+    speak_animation_running = false;
+    ESP_LOGI(TAG, "Speak preempt requested: %s", reason != nullptr ? reason : "unspecified");
+}
+
+static bool execute_speak_command_internal(const char* text, bool pause_voice_listener, const char* cache_name)
 {
     if (text == nullptr || text[0] == '\0') {
         return true;
@@ -4314,10 +4403,17 @@ static bool execute_speak_command_internal(const char* text, bool pause_voice_li
     apply_speaker_volume();
     app2_stop_requested = false;
     M5.Speaker.stop();
+    speech_playback_active = true;
+    speech_expression_overridden = false;
     start_speaking_animation();
-    bool ok = strcmp(text, "我在") == 0 ? stream_cached_reply_pcm("wake_reply", text) : stream_tts_pcm_for_text(text);
+    const char* selected_cache_name = cache_name != nullptr && cache_name[0] != '\0'
+                                          ? cache_name
+                                          : cached_wake_reply_name_for_text(text);
+    bool ok = selected_cache_name[0] != '\0' ? stream_cached_reply_pcm(selected_cache_name, text)
+                                             : stream_tts_pcm_for_text(text);
     M5.Speaker.end();
     stop_speaking_animation();
+    speech_playback_active = false;
     if (audio_mutex != nullptr) {
         xSemaphoreGive(audio_mutex);
     }
@@ -4328,6 +4424,53 @@ static bool execute_speak_command_internal(const char* text, bool pause_voice_li
 static bool execute_speak_command(const char* text)
 {
     return execute_speak_command_internal(text, true);
+}
+
+static bool enqueue_speak_command(const char* cmd_id, const char* text, const char* cache_name, bool pause_voice_listener)
+{
+    if (speak_command_queue == nullptr || text == nullptr || text[0] == '\0') {
+        return false;
+    }
+
+    SpeakCommandItem item = {};
+    snprintf(item.cmd_id, sizeof(item.cmd_id), "%s", cmd_id != nullptr ? cmd_id : "");
+    snprintf(item.text, sizeof(item.text), "%s", text);
+    snprintf(item.cache_name, sizeof(item.cache_name), "%s", cache_name != nullptr ? cache_name : "");
+    item.pause_voice_listener = pause_voice_listener;
+    request_speak_preempt("new speak command");
+    return xQueueOverwrite(speak_command_queue, &item) == pdPASS;
+}
+
+static void run_speak_command_loop()
+{
+    while (true) {
+        SpeakCommandItem item = {};
+        if (xQueueReceive(speak_command_queue, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        app2_stop_requested = false;
+        speak_command_active = true;
+        bool ok = execute_speak_command_internal(item.text, item.pause_voice_listener, item.cache_name);
+        speak_command_active = false;
+        send_command_ack(item.cmd_id, ok ? "done" : "failed", ok ? "" : "speak command interrupted or failed");
+    }
+}
+
+static void start_speak_command_service()
+{
+    if (speak_command_queue == nullptr) {
+        speak_command_queue = xQueueCreate(1, sizeof(SpeakCommandItem));
+    }
+    if (speak_command_queue == nullptr) {
+        ESP_LOGE(TAG, "Failed to create speak command queue");
+        return;
+    }
+    if (speak_command_task_handle == nullptr) {
+        xTaskCreatePinnedToCore([](void*) {
+            run_speak_command_loop();
+        }, "speak_cmd", kSpeakCommandTaskStackBytes, nullptr, 2, &speak_command_task_handle, 0);
+    }
 }
 
 static bool execute_volume_command(const cJSON* payload)
@@ -4567,12 +4710,17 @@ static bool execute_command_object(const cJSON* command)
 
     if (type == "face") {
         std::string expression = json_string_value(payload, "expression");
+        if (speak_command_active || speak_animation_running || speech_playback_active) {
+            speech_expression_overridden = true;
+            speak_animation_running = false;
+        }
         show_expression(expression.empty() ? kDefaultExpression : expression.c_str());
         return true;
     }
     if (type == "speak") {
         std::string text = json_string_value(payload, "text");
-        return execute_speak_command(text.c_str());
+        std::string cache_name = json_string_value(payload, "cache_name");
+        return execute_speak_command_internal(text.c_str(), false, cache_name.c_str());
     }
     if (type == "volume" || type == "sound") {
         return execute_volume_command(payload);
@@ -4586,11 +4734,15 @@ static bool execute_command_object(const cJSON* command)
         float gain_x = static_cast<float>(json_number_value(payload, "gain_x", kFindOwnerYawGain));
         float gain_y = static_cast<float>(json_number_value(payload, "gain_y", kFindOwnerPitchGain));
         float stop_pixels = static_cast<float>(json_number_value(payload, "stop_pixels", kFindOwnerStopPixels));
-        std::string reply = json_string_value(payload, "reply");
-        if (reply.empty()) {
+        const cJSON* reply_item = cJSON_GetObjectItemCaseSensitive(payload, "reply");
+        std::string reply = cJSON_IsString(reply_item) ? reply_item->valuestring : "";
+        if (!cJSON_IsString(reply_item)) {
             reply = "我在";
         }
-        return run_find_owner_command(rounds, reply.c_str(), gain_x, gain_y, stop_pixels);
+        bool preserve_speech = json_bool_value(payload, "preserve_speech", false);
+        bool wait_for_speech = json_bool_value(payload, "wait_for_speech", false);
+        return run_find_owner_command(rounds, reply.c_str(), gain_x, gain_y, stop_pixels, preserve_speech,
+                                      wait_for_speech);
     }
     if (type == "motion" || type == "move") {
         std::string motion_type = json_string_value(payload, "type");
@@ -4678,6 +4830,28 @@ static bool handle_command_response(const std::string& response)
     std::string cmd_type = json_string_value(command, "type");
     ESP_LOGI(TAG, "Command received: id=%s type=%s", cmd_id.c_str(), cmd_type.c_str());
     send_command_ack(cmd_id.c_str(), "received");
+
+    if (cmd_type == "speak") {
+        const cJSON* payload = cJSON_GetObjectItemCaseSensitive(command, "payload");
+        if (!cJSON_IsObject(payload)) {
+            payload = command;
+        }
+        std::string text = json_string_value(payload, "text");
+        std::string cache_name = json_string_value(payload, "cache_name");
+        bool pause_listener = json_bool_value(payload, "pause_listener", false) ||
+                              json_bool_value(payload, "pause_voice_listener", false);
+        bool queued = enqueue_speak_command(cmd_id.c_str(), text.c_str(), cache_name.c_str(), pause_listener);
+        if (!queued) {
+            send_command_ack(cmd_id.c_str(), "failed", "speak queue unavailable or empty text");
+        }
+        cJSON_Delete(root);
+        return queued;
+    }
+
+    if (cmd_type == "stop") {
+        request_speak_preempt("stop command");
+    }
+
     bool ok = execute_command_object(command);
     char message[96] = {};
     if (!ok) {
@@ -4736,6 +4910,7 @@ static void start_background_services()
         current_app = AppId::VoiceDemo;
         voice_status_screen_suppressed = true;
         start_head_touch_services();
+        start_speak_command_service();
 
         if (xiaozhi_task_handle == nullptr) {
             app1_stop_requested = false;

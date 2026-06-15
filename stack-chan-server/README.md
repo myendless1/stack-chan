@@ -8,8 +8,8 @@ Local bridge server for the Xiaopai firmware in this repository. It keeps cloud 
 - Aliyun NLS text-to-speech as streaming `pcm_s16le` audio.
 - OpenClaw event bridge: speech recognition text and device events can be sent to OpenClaw; OpenClaw controls Xiaopai through the HTTP command API.
 - Camera upload receiver for Xiaopai RGB565 frames.
-- RGB565 conversion to PNG and BMP. The Xiaopai camera data is decoded as big-endian RGB565.
-- Local CPU face/head detection using OpenCV YuNet. Detected boxes are returned in the `/upload-image` response and saved as `*.faces.jpg` visualizations.
+- Optional RGB565 conversion to PNG and BMP. The Xiaopai camera data is decoded as big-endian RGB565.
+- Local CPU face/head detection using OpenCV YuNet. Detected boxes are returned in the `/upload-image` response; visualizations are saved only in debug capture mode.
 - Visual tracking loop: `/upload-image` can turn the largest detected face into queued Xiaopai head-motion commands.
 - Legacy local open-source STT/TTS utilities are kept under `legacy/`.
 
@@ -46,7 +46,7 @@ cd stack-chan-server
 
 `start.sh` uses Tsinghua PyPI by default and clears proxy variables for pip installs. Override with `STACKCHAN_PIP_INDEX_URL` and `STACKCHAN_PIP_TRUSTED_HOST` if needed.
 
-Captured images are saved under `captures/` relative to this directory.
+Image uploads are processed in memory by default. Set `STACKCHAN_CAPTURE_SAVE_MODE=raw` or `debug` to save captures under `captures/`.
 
 ## Endpoints
 
@@ -186,7 +186,9 @@ X-Image-Width: 320
 X-Image-Height: 240
 ```
 
-The server saves:
+By default, image uploads are processed in memory for speed and are not written to disk. Set
+`STACKCHAN_CAPTURE_SAVE_MODE=raw` to keep raw uploads, or `STACKCHAN_CAPTURE_SAVE_MODE=debug`
+to also save converted images and face visualizations:
 
 - `*.rgb565`: raw upload
 - `*.png`: converted image
@@ -252,6 +254,8 @@ Environment variables:
 | `STACKCHAN_ALIYUN_TTS_REQUEST_TIMEOUT` | `12` | Per-request TTS timeout in seconds |
 | `STACKCHAN_ALIYUN_TTS_RETRIES` | `2` | TTS retry count |
 | `STACKCHAN_CAPTURE_DIR` | `captures` | Directory for image uploads |
+| `STACKCHAN_CAPTURE_SAVE_MODE` | `none` | Image persistence mode: `none`, `raw`, or `debug` |
+| `STACKCHAN_COMMAND_QUEUE_MAX_SIZE` | `24` | Per-device command queue size before discard/preempt policy applies |
 | `STACKCHAN_STATIC_DIR` | `static` | Directory for cached static assets such as head-touch event audio |
 | `STACKCHAN_FACE_DETECTOR` | `yunet` | Face detector backend for `/upload-image`: `yunet`, `legacy`, or `none` |
 | `STACKCHAN_YUNET_MODEL` | `models/face_detection_yunet_2023mar.onnx` | YuNet ONNX checkpoint path |
@@ -263,6 +267,7 @@ Environment variables:
 | `STACKCHAN_OPENCLAW_MODEL` | `openclaw/default` | OpenClaw agent target |
 | `STACKCHAN_OPENCLAW_BACKEND_MODEL` | empty | Optional `x-openclaw-model` override |
 | `STACKCHAN_OPENCLAW_TIMEOUT` | `45` | OpenClaw request timeout in seconds |
+| `STACKCHAN_OPENCLAW_WORKERS` | `4` | Background OpenClaw event forwarding workers |
 | `STACKCHAN_OPENCLAW_MAX_COMPLETION_TOKENS` | `512` | Max OpenClaw output tokens |
 | `STACKCHAN_OPENCLAW_SESSION_PREFIX` | `xiaopai` | Prefix for per-device OpenClaw session keys |
 

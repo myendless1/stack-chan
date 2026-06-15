@@ -257,6 +257,10 @@ POST /command
 Content-Type: application/json
 ```
 
+Commands support `priority`, `interrupt`, `ttl_seconds`, `discardable`, and `coalesce_key`.
+Defaults make `stop`, volume, find-owner/camera, and face commands outrank motion and speak.
+Low-priority speak/motion/face commands are discardable; repeated speak/face/motion commands keep the newest pending value.
+
 ```json
 {
   "type": "sequence",
@@ -279,8 +283,11 @@ Server queued response:
   "command": {
     "cmd_id": "cmd_ef0dcb4b73b7",
     "type": "speak",
-    "priority": 0,
+    "priority": 10,
     "interrupt": false,
+    "ttl_seconds": 30.0,
+    "discardable": true,
+    "coalesce_key": "speak",
     "payload": {"text": "早上好"},
     "created_at": 1780760998.46
   }
@@ -435,4 +442,4 @@ X-Image-Height: 240
 X-Device-Id: <device_id>
 ```
 
-Face detection visualization is optional. Without `requirements-face.txt`, images are still saved, but face boxes are disabled.
+Image uploads are processed in memory by default. Set `STACKCHAN_CAPTURE_SAVE_MODE=raw` to save raw uploads, or `debug` to also save converted images and face-box visualizations. Without YuNet/OpenCV dependencies, image upload still works but face boxes are disabled.
